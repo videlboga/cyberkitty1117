@@ -21,7 +21,6 @@ from modules.summary import save_message_to_database, get_summary_data
 from modules.export import process_export
 
 ADMIN_ID = 648981358
-PAGE_SIZE = 5
 
 logging.basicConfig(level=logging.INFO)
 
@@ -58,76 +57,26 @@ def get_admin_groups(user_id, db):
             groups[cid] = title
     return groups
 
-
-
-def _build_group_page_kb(groups: dict, page: int):
-    """Build paginated inline keyboard for group list."""
-    group_items = list(groups.items())
-    total = len(group_items)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-
-    start = page * PAGE_SIZE
-    end = min(start + PAGE_SIZE, total)
-    page_items = group_items[start:end]
-
-    keyboard_rows = []
-    for cid, title in page_items:
-        keyboard_rows.append([InlineKeyboardButton(text=f"📁 {title}", callback_data=f"manage:{cid}")])
-
-    if total > 0:
-        keyboard_rows.append([InlineKeyboardButton(text="🌍 Глобальный сбор", callback_data="global_summary")])
-
-    nav_row = []
-    if total_pages > 1:
-        if page > 0:
-            nav_row.append(InlineKeyboardButton(text="◀️", callback_data=f"main_menu_page:{page - 1}"))
-        nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{total_pages}", callback_data="nav_info"))
-        if page < total_pages - 1:
-            nav_row.append(InlineKeyboardButton(text="▶️", callback_data=f"main_menu_page:{page + 1}"))
-    if nav_row:
-        keyboard_rows.append(nav_row)
-
-    return InlineKeyboardMarkup(inline_keyboard=keyboard_rows), total_pages
-
-
 @dp.message(Command(commands=['start', 'menu']))
 async def cmd_start(message: Message):
     if message.chat.type != 'private':
         return await message.reply("Управление ботом перенесено в личные сообщения. Напишите мне /start в ЛС.")
-
+    
     db = load_database()
     user_id = str(message.from_user.id)
     groups = get_admin_groups(user_id, db)
-
+    
     if not groups:
         return await message.answer("Привет! Я бот-суммаризатор.\nВы пока не привязали ни одной группы.\n\nПросто добавьте меня в вашу группу (и любые сообщения в ней), и она автоматически появится здесь в меню управления (для всех администраторов этой группы).")
-
-    kb, _ = _build_group_page_kb(groups, 0)
-    await message.answer("🎛 Главное меню управления группами:\nВыберите группу для действий:", reply_markup=kb)
-
-
-
-@dp.callback_query(F.data.startswith('main_menu_page:'))
-async def cb_main_menu_page(callback_query: CallbackQuery):
-    await callback_query.answer()
-    db = load_database()
-    user_id = str(callback_query.from_user.id)
-    groups = get_admin_groups(user_id, db)
-
-    if not groups:
-        await callback_query.message.edit_text("Привет! Я бот-суммаризатор.\nВы пока не привязали ни одной группы.")
-        return
-
-    page = int(callback_query.data.split(':')[1])
-    kb, _ = _build_group_page_kb(groups, page)
-    await callback_query.message.edit_text("🎛 Главное меню управления группами:\nВыберите группу для действий:", reply_markup=kb)
-
-
-@dp.callback_query(F.data == 'nav_info')
-async def cb_nav_info(callback_query: CallbackQuery):
-    await callback_query.answer("Используйте ◀️▶️ для переключения страниц", show_alert=False)
-
+    
+    builder = InlineKeyboardBuilder()
+    for cid, title in groups.items():
+        builder.button(text=f"📁 {title}", callback_data=f"manage:{cid}")
+    if len(groups) > 0:
+        builder.button(text="🌍 Глобальный сбор", callback_data="global_summary")
+    builder.adjust(1)
+    
+    await message.answer("🎛 Главное меню управления группами:\nВыберите группу для действий:", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith('manage:'))
 async def cb_manage_group(callback_query: CallbackQuery, bot: Bot):
@@ -167,16 +116,8 @@ async def cb_manage_group(callback_query: CallbackQuery, bot: Bot):
 @dp.callback_query(F.data == 'main_menu')
 async def cb_main_menu(callback_query: CallbackQuery, bot: Bot):
     await callback_query.answer()
-    db = load_database()
-    user_id = str(callback_query.from_user.id)
-    groups = get_admin_groups(user_id, db)
-
-    if not groups:
-        await callback_query.message.edit_text("Привет! Я бот-суммаризатор.\nВы пока не привязали ни одной группы.")
-        return
-
-    kb, _ = _build_group_page_kb(groups, 0)
-    await callback_query.message.edit_text("🎛 Главное меню управления группами:\nВыберите группу для действий:", reply_markup=kb)
+    callback_query.message.from_user = callback_query.from_user
+    await cmd_start(callback_query.message)
 
 @dp.callback_query(F.data.startswith('sum_period:'))
 async def cb_sum_period(callback_query: CallbackQuery, bot: Bot):
