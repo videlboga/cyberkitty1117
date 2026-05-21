@@ -1,0 +1,415 @@
+"""Main entry for the Telegram bot, managing lifecycle and user roles via DM menu."""
+import asyncio
+from aiogram import Bot, Dispatcher, types, executor
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from modules.config import API_TOKEN as BOT_TOKEN
+ADMIN_ID = 648981358
+from modules.db import load_database, save_database
+from modules.summary import save_message_to_database, get_summary_data
+from modules.export import process_export
+from datetime import datetime as dt, timedelta
+
+print("Инициализация нового цикла событий...")
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+bot = Bot(token=BOT_TOKEN, parse_mode=types.ParseMode.HTML, loop=loop)
+dp = Dispatcher(bot, loop=loop)
+
+
+async def safe_answer_callback(callback_query: types.CallbackQuery, text: str | None = None, show_alert: bool = False):
+    """Try to answer a callback_query but ignore invalid/expired query errors.
+
+    Telegram can return InvalidQueryID if the callback is too old or was already answered.
+    We swallow those errors to avoid crashing the handler pipeline.
+    """
+    try:
+        if text is None:
+            await callback_query.answer()
+        else:
+            await callback_query.answer(text, show_alert=show_alert)
+    except Exception as e:
+        # Ignore InvalidQueryID/BadRequest here; log minimally.
+        print(f"Ignored callback answer error: {e}")
+
+def is_superadmin(user_id, db):
+    return str(user_id) in db.get('superadmins', [str(ADMIN_ID)])
+
+def is_admin(user_id, chat_id_str, db):
+    if is_superadmin(user_id, db): return True
+    return str(user_id) in db.get('chats', {}).get(chat_id_str, {}).get('admins', [])
+
+def get_admin_groups(user_id, db):
+    """Список групп, в которых юзер админ или суперадмин."""
+    is_sa = is_superadmin(user_id, db)
+    groups = {}
+    for cid, cdata in db.get('chats', {}).items():
+        if str(user_id) in cdata.get('admins', []) or is_sa:
+            title = cdata.get('title', f"Группа {cid}")
+            if title == cid or str(title).startswith('-'):
+                # Если названия нет, оно подхватится при первом взаимодействии с чатом
+                # Но временно выведем ID, чтобы было понятно
+                title = f"Чат {cid}"
+            groups[cid] = title
+    return groups
+
+@dp.message_handler(commands=['start', 'menu'])
+async def cmd_start(message: types.Message):
+    if message.chat.type != 'private':
+        return await message.reply("Управление ботом перенесено в личные сообщения. Напишите мне /start в ЛС.")
+        
+    db = load_database()
+    user_id = str(message.from_user.id)
+    groups = get_admin_groups(user_id, db)
+    
+    if not groups:
+        return await message.answer("Привет! Я бот-суммаризатор.\nВы пока не привязали ни одной группы.\n\nПросто добавьте меня в вашу группу (и любые сообщения в ней), и она автоматически появится здесь в меню управления (для всех администраторов этой группы).")
+    
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    for cid, title in groups.items():
+        keyboard.add(InlineKeyboardButton(text=f"📁 {title}", callback_data=f"manage:{cid}"))
+        
+    if len(groups) > 0:
+        keyboard.add(InlineKeyboardButton(text="🌍 Глобальный сбор", callback_data="global_summary"))
+        
+    await message.answer("🎛 Главное меню управления группами:\nВыберите группу для действий:", reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('manage:'))
+async def cb_manage_group(callback_query: types.CallbackQuery):
+    # Acknowledge callback immediately so the client doesn't keep a spinner
+    await safe_answer_callback(callback_query)
+    db = load_database()
+    user_id = str(callback_query.from_user.id)
+    chat_id_str = callback_query.data.split(':')[1]
+    
+    if not is_admin(user_id, chat_id_str, db):
+        return await callback_query.answer("Нет прав!", show_alert=True)
+        
+    title = db.get('chats', {}).get(chat_id_str, {}).get('title', chat_id_str)
+    
+    # Авто-обновление названия, если оно равно ID
+    if title == chat_id_str or str(title).startswith('-'):
+        try:
+            chat_info = await bot.get_chat(chat_id_str)
+            if chat_info.title:
+                title = chat_info.title
+                db['chats'][chat_id_str]['title'] = title
+                await save_database(db)
+        except Exception:
+            pass
+            
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    keyboard.add(
+        InlineKeyboardButton(text="📊 Собрать сводку", callback_data=f"sum_period:{chat_id_str}"),
+        InlineKeyboardButton(text="📦 Выгрузить JSON", callback_data=f"export:{chat_id_str}")
+    )
+    keyboard.add(InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"settings:{chat_id_str}"))
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu"))
+    
+    await bot.edit_message_text(
+        text=f"⚙️ Управление: <b>{title}</b>",
+        chat_id=callback_query.message.chat.id,
+        message_id=callback_query.message.message_id,
+        reply_markup=keyboard
+    )
+
+@dp.callback_query_handler(lambda c: c.data == 'main_menu')
+async def cb_main_menu(callback_query: types.CallbackQuery):
+    await bot.answer_callback_query(callback_query.id)
+    # Имитируем команду /start для отрисовки меню
+    callback_query.message.from_user = callback_query.from_user
+    await cmd_start(callback_query.message)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('sum_period:'))
+async def cb_sum_period(callback_query: types.CallbackQuery):
+    # Acknowledge callback to provide immediate feedback in client
+    await safe_answer_callback(callback_query)
+    db = load_database()
+    chat_id_str = callback_query.data.split(':')[1]
+    user_id = str(callback_query.from_user.id)
+    if not is_admin(user_id, chat_id_str, db): return await callback_query.answer("Нет прав!", show_alert=True)
+
+    today = dt.now().date()
+    yesterday = today - timedelta(days=1)
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    
+    history = db.get('chats', {}).get(chat_id_str, {}).get('history', {})
+    dates = list(set([str(today), str(yesterday)] + list(history.keys())))
+    dates.sort(reverse=True)
+    dates = dates[:7] # last 7 days max
+
+    for d in dates:
+        if d == str(today): label = "📅 Сегодня"
+        elif d == str(yesterday): label = "🔙 Вчера"
+        else: label = f"📆 {d}"
+        keyboard.add(InlineKeyboardButton(text=label, callback_data=f"summary:{chat_id_str}:{d}"))
+        
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"manage:{chat_id_str}"))
+    await bot.edit_message_text("Выберите период для сводки:", callback_query.message.chat.id, callback_query.message.message_id, reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('summary:'))
+async def cb_summary_group(callback_query: types.CallbackQuery):
+    await callback_query.answer("Собираю данные, это займет время...")
+    db = load_database()
+    parts = callback_query.data.split(':')
+    chat_id_str = parts[1]
+    date_str = parts[2] if len(parts) > 2 else str(dt.now().date())
+    user_id = str(callback_query.from_user.id)
+    
+    if not is_admin(user_id, chat_id_str, db): return
+    
+    summary = await get_summary_data(chat_id_str, date_str, db)
+    
+    if summary:
+        await bot.send_message(callback_query.message.chat.id, f"✅ Сводка за {date_str} собрана:")
+        # Присылаем только админу в ЛС
+        await bot.send_message(callback_query.message.chat.id, summary)
+    else:
+        await bot.send_message(callback_query.message.chat.id, f"ℹ️ В группе за {date_str} сообщений нет.")
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('export:'))
+async def cb_export_group(callback_query: types.CallbackQuery):
+    await callback_query.answer("Формирую данные...")
+    db = load_database()
+    chat_id_str = callback_query.data.split(':')[1]
+    user_id = str(callback_query.from_user.id)
+    
+    if not is_admin(user_id, chat_id_str, db): return
+    
+    chat_data = db.get('chats', {}).get(chat_id_str, {})
+    await process_export(callback_query.message, chat_data, chat_id_str, args=[])
+
+@dp.callback_query_handler(lambda c: c.data == 'global_summary')
+async def cb_global_summary_menu(callback_query: types.CallbackQuery):
+    # Acknowledge callback to avoid UI hanging
+    await safe_answer_callback(callback_query)
+    db = load_database()
+    user_groups = get_admin_groups(callback_query.from_user.id, db)
+    if not user_groups: return await callback_query.answer("Нет групп для сбора", show_alert=True)
+    
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    today = dt.now().date()
+    keyboard.add(
+        InlineKeyboardButton(text="📅 Сегодня", callback_data=f"global_act:{today}"),
+        InlineKeyboardButton(text="🔙 Вчера", callback_data=f"global_act:{today - timedelta(days=1)}"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")
+    )
+    await bot.edit_message_text("Выберите период для глобального сбора:", callback_query.message.chat.id, callback_query.message.message_id, reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('global_act:'))
+async def cb_global_summary_act(callback_query: types.CallbackQuery):
+    db = load_database()
+    user_id = str(callback_query.from_user.id)
+    user_groups = get_admin_groups(user_id, db)
+    if not user_groups: return await callback_query.answer("Нет групп", show_alert=True)
+    
+    date_str = callback_query.data.split(':')[1]
+    await callback_query.answer("Обхожу чаты...")
+    await bot.send_message(callback_query.message.chat.id, f"🔄 Обход чатов за {date_str}...")
+    
+    success_count = 0
+    for c_id, title in user_groups.items():
+        summary = await get_summary_data(c_id, date_str, db)
+        if summary:
+            # Send summary to user who initiated the request
+            await bot.send_message(callback_query.message.chat.id, f"📁 <b>{title}</b>:\n{summary}")
+            success_count += 1
+            
+    if success_count > 0:
+        await bot.send_message(callback_query.message.chat.id, f"✅ Глобальный сбор завершен. Собрано сводок: {success_count}.")
+    else:
+        await bot.send_message(callback_query.message.chat.id, "ℹ️ Нет сообщений за эту дату.")
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('settings:'))
+async def cb_settings(callback_query: types.CallbackQuery):
+    # Acknowledge callback to stop client spinner
+    await safe_answer_callback(callback_query)
+    db = load_database()
+    chat_id_str = callback_query.data.split(':')[1]
+    if not is_admin(str(callback_query.from_user.id), chat_id_str, db): return
+    
+    settings = db.get('chats', {}).get(chat_id_str, {}).get('settings', {})
+    time_hour = settings.get('summary_time', 21)
+    topic_id = settings.get('summary_topic_id')
+    topic_text = f"ID {topic_id}" if topic_id else "Не задана (общий чат)"
+    
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton(text=f"🕒 Время отправки: {time_hour}:00", callback_data=f"set_time_menu:{chat_id_str}"),
+        InlineKeyboardButton(text=f"📂 Тема: {topic_text}", callback_data=f"set_topic_info:{chat_id_str}"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data=f"manage:{chat_id_str}")
+    )
+    await bot.edit_message_text("⚙️ <b>Настройки группы</b>", callback_query.message.chat.id, callback_query.message.message_id, reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('set_time_menu:'))
+async def cb_set_time_menu(callback_query: types.CallbackQuery):
+    # Acknowledge callback to provide quick UI response
+    await safe_answer_callback(callback_query)
+    chat_id_str = callback_query.data.split(':')[1]
+    keyboard = InlineKeyboardMarkup(row_width=4)
+    btns = [InlineKeyboardButton(text=f"{i}:00", callback_data=f"save_time:{chat_id_str}:{i}") for i in range(24)]
+    keyboard.add(*btns)
+    keyboard.add(InlineKeyboardButton(text="🔙 Назад", callback_data=f"settings:{chat_id_str}"))
+    await bot.edit_message_text("Выберите час для отправки автоматической сводки (по серверному времени):", callback_query.message.chat.id, callback_query.message.message_id, reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('save_time:'))
+async def cb_save_time(callback_query: types.CallbackQuery):
+    _, chat_id_str, hour_str = callback_query.data.split(':')
+    db = load_database()
+    if 'settings' not in db['chats'][chat_id_str]: db['chats'][chat_id_str]['settings'] = {}
+    db['chats'][chat_id_str]['settings']['summary_time'] = int(hour_str)
+    await save_database(db)
+    callback_query.data = f"settings:{chat_id_str}"
+    # Acknowledge save action, then show settings
+    await safe_answer_callback(callback_query)
+    await cb_settings(callback_query)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('set_topic_info:'))
+async def cb_set_topic_info(callback_query: types.CallbackQuery):
+    # Acknowledge callback to provide immediate feedback
+    await safe_answer_callback(callback_query)
+    chat_id_str = callback_query.data.split(':')[1]
+    keyboard = InlineKeyboardMarkup(row_width=1)
+    keyboard.add(
+        InlineKeyboardButton(text="❌ Сбросить (отправлять в общий)", callback_data=f"reset_topic:{chat_id_str}"),
+        InlineKeyboardButton(text="🔙 Назад", callback_data=f"settings:{chat_id_str}")
+    )
+    text = ("Для отправки автоматической сводки в определенную подтему (топик), перейдите в этот топик в самой группе и отправьте команду:\n\n"
+            "<code>/set_summary_topic</code>\n\n"
+            "Бот запомнит этот топик и будет отправлять туда ежедневную сводку.")
+    await bot.edit_message_text(text, callback_query.message.chat.id, callback_query.message.message_id, reply_markup=keyboard)
+
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('reset_topic:'))
+async def cb_reset_topic(callback_query: types.CallbackQuery):
+    chat_id_str = callback_query.data.split(':')[1]
+    db = load_database()
+    if 'settings' in db['chats'][chat_id_str] and 'summary_topic_id' in db['chats'][chat_id_str]['settings']:
+        del db['chats'][chat_id_str]['settings']['summary_topic_id']
+        await save_database(db)
+    callback_query.data = f"settings:{chat_id_str}"
+    await safe_answer_callback(callback_query)
+    await cb_settings(callback_query)
+
+@dp.message_handler(commands=['set_summary_topic'])
+async def cmd_set_summary_topic(message: types.Message):
+    if message.chat.type == 'private': return
+    db = load_database()
+    chat_id_str = str(message.chat.id)
+    if not is_admin(str(message.from_user.id), chat_id_str, db): return
+    
+    if not message.is_topic_message and not message.message_thread_id:
+        return await message.reply("Эту команду нужно писать только внутри нужной подтемы (топика)!")
+        
+    if 'settings' not in db['chats'][chat_id_str]: db['chats'][chat_id_str]['settings'] = {}
+    db['chats'][chat_id_str]['settings']['summary_topic_id'] = message.message_thread_id
+    await save_database(db)
+    await message.reply("✅ Автоматическая сводка теперь будет приходить в этот топик.")
+
+@dp.message_handler(commands=['sa'])
+async def cmd_superadmin_menu(message: types.Message):
+    if message.chat.type != 'private': return
+    db = load_database()
+    user_id = str(message.from_user.id)
+    if not is_superadmin(user_id, db):
+        return await message.reply("У вас нет прав суперадмина.")
+        
+    text = "👑 <b>Меню суперадмина</b>\n\nСписок администраторов и их каналы:\n\n"
+    admins_map = {}
+    
+    for cid, cdata in db.get('chats', {}).items():
+        title = cdata.get('title', cid)
+        for admin in cdata.get('admins', []):
+            if admin not in admins_map:
+                admins_map[admin] = []
+            admins_map[admin].append(title)
+            
+    if not admins_map:
+        text += "<i>Нет подключенных администраторов.</i>"
+    else:
+        users = db.get('users', {})
+        for admin, titles in admins_map.items():
+            username = users.get(admin, {}).get('username', f"ID: {admin}")
+            text += f"👤 <b>{username}</b> (<code>{admin}</code>):\n"
+            for t in titles:
+                text += f"  ➖ {t}\n"
+    
+    await message.answer(text)
+
+@dp.message_handler(commands=['summary', 'export'])
+async def cmd_ignore_public(message: types.Message):
+    if message.chat.type != 'private':
+        await message.reply("Пожалуйста, управляйте ботом через личные сообщения: напишите мне в ЛС /start")
+
+@dp.message_handler(content_types=['text', 'photo', 'video', 'document', 'audio', 'voice', 'new_chat_members'])
+async def process_messages(message: types.Message):
+    if message.chat.type == 'private': return
+    if not message.text and not message.caption and not message.new_chat_members: return
+    db = load_database()
+    if 'superadmins' not in db: db['superadmins'] = [str(ADMIN_ID)]
+    if 'chats' not in db: db['chats'] = {}
+    chat_id_str = str(message.chat.id)
+    
+    if chat_id_str not in db['chats']: db['chats'][chat_id_str] = {'admins': [], 'settings': {}, 'history': {}, 'admins_updated_at': 0}
+    
+    # Save/Update Title
+    if message.chat.title:
+        db['chats'][chat_id_str]['title'] = message.chat.title
+
+    # Update admins cache periodically (every 1 hour) or if empty
+    chat_data = db['chats'][chat_id_str]
+    now_ts = dt.now().timestamp()
+    if now_ts - chat_data.get('admins_updated_at', 0) > 3600 or not chat_data.get('admins'):
+        try:
+            admins = await bot.get_chat_administrators(message.chat.id)
+            chat_data['admins'] = [str(a.user.id) for a in admins if not a.user.is_bot]
+            chat_data['admins_updated_at'] = now_ts
+        except Exception:
+            pass
+
+    if message.new_chat_members:
+        await save_database(db)
+        return
+
+    await save_message_to_database(message, db, chat_id_str)
+    await save_database(db)
+
+async def daily_summary_job():
+    await asyncio.sleep(10)
+    print("Фоновый воркер запущен.")
+    while True:
+        try:
+            now = dt.now()
+            today = str(now.date())
+            db = load_database()
+            chats = db.get("chats", {})
+            changed = False
+            for c_id, c_data in chats.items():
+                settings = c_data.get("settings", {})
+                target_hour = settings.get("summary_time", 21)
+                target_topic_id = settings.get("summary_topic_id")
+                
+                if now.hour == target_hour and c_data.get("last_summary_date") != today:
+                    summary = await get_summary_data(c_id, today, db)
+                    if summary:
+                        try:
+                            if target_topic_id:
+                                await bot.send_message(c_id, summary, message_thread_id=target_topic_id)
+                            else:
+                                await bot.send_message(c_id, summary)
+                            c_data["last_summary_date"] = today
+                            changed = True
+                        except Exception as e: print(e)
+            if changed: await save_database(db)
+        except Exception as e: print(e)
+        await asyncio.sleep(60)
+
+async def on_startup(dp):
+    print("Бот переведен на управление через ЛС.")
+    asyncio.create_task(daily_summary_job())
+
+if __name__ == '__main__':
+    try: loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
