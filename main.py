@@ -18,7 +18,7 @@ from aiogram.enums import ParseMode
 from modules.config import API_TOKEN as BOT_TOKEN
 from modules.db import load_database, save_database
 from modules.summary import save_message_to_database, get_summary_data
-from modules.export import process_export
+from modules.export import process_export, build_global_export_csv_bytes
 
 ADMIN_ID = 648981358
 PAGE_SIZE = 5
