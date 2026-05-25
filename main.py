@@ -21,6 +21,7 @@ from modules.summary import save_message_to_database, get_summary_data
 from modules.export import process_export
 
 ADMIN_ID = 648981358
+PAGE_SIZE = 5
 
 logging.basicConfig(level=logging.INFO)
 
@@ -57,6 +58,37 @@ def get_admin_groups(user_id, db):
             groups[cid] = title
     return groups
 
+def _build_group_page_kb(groups: dict, page: int):
+    """Build paginated inline keyboard for group list."""
+    group_items = list(groups.items())
+    total = len(group_items)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    
+    start = page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, total)
+    page_items = group_items[start:end]
+    
+    keyboard_rows = []
+    for cid, title in page_items:
+        keyboard_rows.append([InlineKeyboardButton(text=f"📁 {title}", callback_data=f"manage:{cid}")])
+    
+    if total > 0:
+        keyboard_rows.append([InlineKeyboardButton(text="🌍 Глобальный сбор", callback_data="global_summary")])
+        
+    nav_row = []
+    if total_pages > 1:
+        if page > 0:
+            nav_row.append(InlineKeyboardButton(text="◀️", callback_data=f"main_menu_page:{page - 1}"))
+        nav_row.append(InlineKeyboardButton(text=f" 📄 {page + 1}/{total_pages}", callback_data="nav_info"))
+        if page < total_pages - 1:
+            nav_row.append(InlineKeyboardButton(text="▶️", callback_data=f"main_menu_page:{page + 1}"))
+            
+    if nav_row:
+        keyboard_rows.append(nav_row)
+        
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_rows), total_pages
+
 @dp.message(Command(commands=['start', 'menu']))
 async def cmd_start(message: Message):
     if message.chat.type != 'private':
@@ -69,14 +101,25 @@ async def cmd_start(message: Message):
     if not groups:
         return await message.answer("Привет! Я бот-суммаризатор.\nВы пока не привязали ни одной группы.\n\nПросто добавьте меня в вашу группу (и любые сообщения в ней), и она автоматически появится здесь в меню управления (для всех администраторов этой группы).")
     
-    builder = InlineKeyboardBuilder()
-    for cid, title in groups.items():
-        builder.button(text=f"📁 {title}", callback_data=f"manage:{cid}")
-    if len(groups) > 0:
-        builder.button(text="🌍 Глобальный сбор", callback_data="global_summary")
-    builder.adjust(1)
-    
-    await message.answer("🎛 Главное меню управления группами:\nВыберите группу для действий:", reply_markup=builder.as_markup())
+    kb, _ = _build_group_page_kb(groups, 0)
+    await message.answer("🎛 Главное меню управления группами:\nВыберите группу для действий:", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith('main_menu_page:'))
+async def cb_main_menu_page(callback_query: CallbackQuery):
+    await callback_query.answer()
+    db = load_database()
+    user_id = str(callback_query.from_user.id)
+    groups = get_admin_groups(user_id, db)
+    if not groups:
+        await callback_query.message.edit_text("Привет! Я бот-суммаризатор.\nВы пока не привязали ни одной группы.")
+        return
+    page = int(callback_query.data.split(':')[1])
+    kb, _ = _build_group_page_kb(groups, page)
+    await callback_query.message.edit_text("🎛 Главное меню управления группами:\nВыберите группу для действий:", reply_markup=kb)
+
+@dp.callback_query(F.data == 'nav_info')
+async def cb_nav_info(callback_query: CallbackQuery):
+    await callback_query.answer("Используйте ◀️▶️ для переключения страниц", show_alert=False)
 
 @dp.callback_query(F.data.startswith('manage:'))
 async def cb_manage_group(callback_query: CallbackQuery, bot: Bot):
@@ -116,8 +159,14 @@ async def cb_manage_group(callback_query: CallbackQuery, bot: Bot):
 @dp.callback_query(F.data == 'main_menu')
 async def cb_main_menu(callback_query: CallbackQuery, bot: Bot):
     await callback_query.answer()
-    callback_query.message.from_user = callback_query.from_user
-    await cmd_start(callback_query.message)
+    db = load_database()
+    user_id = str(callback_query.from_user.id)
+    groups = get_admin_groups(user_id, db)
+    if not groups:
+        await callback_query.message.edit_text("Привет! Я бот-суммаризатор.\nВы пока не привязали ни одной группы.")
+        return
+    kb, _ = _build_group_page_kb(groups, 0)
+    await callback_query.message.edit_text("🎛 Главное меню управления группами:\nВыберите группу для действий:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith('sum_period:'))
 async def cb_sum_period(callback_query: CallbackQuery, bot: Bot):
@@ -185,36 +234,129 @@ async def cb_global_summary_menu(callback_query: CallbackQuery, bot: Bot):
     if not user_groups: return await callback_query.answer("Нет групп для сбора", show_alert=True)
     
     builder = InlineKeyboardBuilder()
-    today = dt.now().date()
-    builder.button(text="📅 Сегодня", callback_data=f"global_act:{today}")
-    builder.button(text="🔙 Вчера", callback_data=f"global_act:{today - timedelta(days=1)}")
-    builder.button(text="🔙 Назад", callback_data="main_menu")
+    builder.button(text="📊 Собрать сводки", callback_data="global_action:summary")
+    builder.button(text="📦 Выгрузить CSV", callback_data="global_action:export")
+    builder.button(text="�� Назад", callback_data="main_menu")
     builder.adjust(1)
     
-    await bot.edit_message_text("Выберите период для глобального сбора:", callback_query.message.chat.id, callback_query.message.message_id, reply_markup=builder.as_markup())
+    await bot.edit_message_text(
+        "🌍 <b>Глобальный сбор</b>\nВыберите действие:",
+        callback_query.message.chat.id,
+        callback_query.message.message_id,
+        reply_markup=builder.as_markup(),
+    )
 
-@dp.callback_query(F.data.startswith('global_act:'))
-async def cb_global_summary_act(callback_query: CallbackQuery, bot: Bot):
+@dp.callback_query(F.data.startswith('global_action:'))
+async def cb_global_action_choose_period(callback_query: CallbackQuery, bot: Bot):
+    await safe_answer_callback(callback_query)
+    db = load_database()
+    user_groups = get_admin_groups(callback_query.from_user.id, db)
+    if not user_groups:
+        return await callback_query.answer("Нет групп", show_alert=True)
+
+    action = callback_query.data.split(":")[1]
+    
+    today = dt.now().date()
+    yesterday = today - timedelta(days=1)
+    
+    dates = {str(today), str(yesterday)}
+    for chat_id in user_groups.keys():
+        history = db.get("chats", {}).get(chat_id, {}).get("history", {}) or {}
+        dates.update(history.keys())
+        
+    sorted_dates = sorted(dates, reverse=True)[:7]
+    
+    builder = InlineKeyboardBuilder()
+    if action == "export":
+        builder.button(text="🗂 Всё время", callback_data="global_run:export:all")
+        
+    for d in sorted_dates:
+        if d == str(today):
+            label = "📅 Сегодня"
+        elif d == str(yesterday):
+            label = "🔙 Вчера"
+        else:
+            label = f"�� {d}"
+        builder.button(text=label, callback_data=f"global_run:{action}:{d}")
+        
+    builder.button(text="🔙 Назад", callback_data="global_summary")
+    builder.adjust(1)
+
+    title = "сводок" if action == "summary" else "выгрузки CSV"
+    await bot.edit_message_text(
+        f"Выберите период для {title}:",
+        callback_query.message.chat.id,
+        callback_query.message.message_id,
+        reply_markup=builder.as_markup(),
+    )
+
+@dp.callback_query(F.data.startswith("global_run:"))
+async def cb_global_run(callback_query: CallbackQuery, bot: Bot):
     db = load_database()
     user_id = str(callback_query.from_user.id)
     user_groups = get_admin_groups(user_id, db)
-    if not user_groups: return await callback_query.answer("Нет групп", show_alert=True)
+    if not user_groups:
+        return await callback_query.answer("Нет групп", show_alert=True)
+        
+    _prefix, action, period = callback_query.data.split(":", 2)
     
-    date_str = callback_query.data.split(':')[1]
-    await callback_query.answer("Обхожу чаты...")
-    await bot.send_message(callback_query.message.chat.id, f"🔄 Обход чатов за {date_str}...")
-    
-    success_count = 0
-    for c_id, title in user_groups.items():
-        summary = await get_summary_data(c_id, date_str, db)
-        if summary:
-            await bot.send_message(callback_query.message.chat.id, f"📁 <b>{title}</b>:\n{summary}")
-            success_count += 1
+    if action == "summary":
+        await callback_query.answer("Обхожу чаты...")
+        await bot.send_message(
+            callback_query.message.chat.id, f"🔄 Обход чатов за {period}..."
+        )
+        
+        success_count = 0
+        for c_id, title in user_groups.items():
+            summary = await get_summary_data(c_id, period, db)
+            if summary:
+                await bot.send_message(
+                    callback_query.message.chat.id, f"📁 <b>{title}</b>:\n{summary}"
+                )
+                success_count += 1
+                
+        if success_count > 0:
+            await bot.send_message(
+                callback_query.message.chat.id,
+                f"✅ Глобальный сбор завершен. Собрано сводок: {success_count}.",
+            )
+        else:
+            await bot.send_message(callback_query.message.chat.id, "ℹ️ Нет сообщений за эту дату.")
+        return
+
+    if action == "export":
+        await callback_query.answer("Формирую CSV...")
+        args = []
+        if period != "all":
+            args = [period]
             
-    if success_count > 0:
-        await bot.send_message(callback_query.message.chat.id, f"✅ Глобальный сбор завершен. Собрано сводок: {success_count}.")
-    else:
-        await bot.send_message(callback_query.message.chat.id, "ℹ️ Нет сообщений за эту дату.")
+        chats = []
+        for c_id, title in user_groups.items():
+            chat_data = db.get("chats", {}).get(c_id, {})
+            chats.append((c_id, title, chat_data))
+            
+        csv_bytes, period_str, err = build_global_export_csv_bytes(chats, args=args, db=db)
+        if err:
+            return await bot.send_message(callback_query.message.chat.id, err)
+            
+        filename_period = period if period != "all" else "all"
+        await bot.send_message(
+            callback_query.message.chat.id,
+            f"📦 Глобальная выгрузка {period_str}.",
+        )
+        await bot.send_document(
+            callback_query.message.chat.id,
+            document=BufferedInputFile(csv_bytes, filename=f"export_global_{filename_period}_new.csv"),
+        )
+        return
+
+    await callback_query.answer("Неизвестное действие", show_alert=True)
+
+@dp.callback_query(F.data.startswith("global_act:"))
+async def cb_global_summary_act_legacy(callback_query: CallbackQuery, bot: Bot):
+    # Backward-compatible handler for old buttons: treat as "summary for date"
+    callback_query.data = callback_query.data.replace("global_act:", "global_run:summary:", 1)
+    await cb_global_run(callback_query, bot)
 
 @dp.callback_query(F.data.startswith('settings:'))
 async def cb_settings(callback_query: CallbackQuery, bot: Bot):
