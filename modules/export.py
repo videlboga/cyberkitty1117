@@ -80,11 +80,15 @@ async def process_export(target_message, chat_data: dict, chat_id: str, args: li
             if msg_id:
                 msg_author_map[msg_id] = uid
                 
+            msg_text = msg.get("text_in_msg", "") or msg.get("text", "")
+            if not msg_text:
+                msg_text = "[Медиа/Без текста]"
+
             all_messages.append({
                 "user_id": uid,
                 "link": link,
                 "date": msg.get("timestamp", date_key),
-                "text": msg.get("text_in_msg", "")
+                "text": msg_text
             })
 
     # 2. Проход по реакциям (кто кому поставил)
@@ -260,8 +264,8 @@ def build_global_export_csv_bytes(chats, args=None, db=None) -> tuple[bytes, str
                 if link:
                     parts = link.split("/")
                     if len(parts) > 0 and parts[-1].isdigit():
-                        msg_id = int(parts[-1])
-                        
+                    msg_id = int(parts[-1])
+                            
                 uid_chat_key = f"{uid}_{c_id}"
                 if uid_chat_key not in user_stats:
                     user_stats[uid_chat_key] = {"uid": uid, "chat_title": title, "messages": 0, "reactions_given": 0, "reactions_received": 0}
@@ -269,16 +273,19 @@ def build_global_export_csv_bytes(chats, args=None, db=None) -> tuple[bytes, str
                 user_stats[uid_chat_key]["messages"] += 1
                 if msg_id:
                     msg_author_map[f"{c_id}_{msg_id}"] = uid_chat_key
-                    
+                
+                # Use "text_in_msg" fallback to "text" inside the JSON or a placeholder.
+                msg_text = msg.get("text_in_msg", "") or msg.get("text", "")
+                if not msg_text:
+                    msg_text = "[Медиа/Без текста]"
+
                 all_messages.append({
                     "chat_title": title,
                     "user_id": uid,
                     "link": link,
                     "date": msg.get("timestamp", date_key),
-                    "text": msg.get("text_in_msg", "")
-                })
-
-        for date_key, reactions in export_reactions.items():
+                    "text": msg_text
+                })        for date_key, reactions in export_reactions.items():
             for rxn in reactions:
                 reactor = str(rxn.get("reactor_user_id"))
                 delta = rxn.get("delta", 0)
