@@ -71,7 +71,7 @@ async def process_export(target_message, chat_data: dict, chat_id: str, args: li
             if link:
                 parts = link.split("/")
                 if len(parts) > 0 and parts[-1].isdigit():
-                    msg_id = int(parts[-1])
+                        msg_id = int(parts[-1])
             
             if uid not in user_stats:
                 user_stats[uid] = {"messages": 0, "reactions_given": 0, "reactions_received": 0}
@@ -264,7 +264,7 @@ def build_global_export_csv_bytes(chats, args=None, db=None) -> tuple[bytes, str
                 if link:
                     parts = link.split("/")
                     if len(parts) > 0 and parts[-1].isdigit():
-                    msg_id = int(parts[-1])
+                        msg_id = int(parts[-1])
                             
                 uid_chat_key = f"{uid}_{c_id}"
                 if uid_chat_key not in user_stats:
@@ -285,7 +285,8 @@ def build_global_export_csv_bytes(chats, args=None, db=None) -> tuple[bytes, str
                     "link": link,
                     "date": msg.get("timestamp", date_key),
                     "text": msg_text
-                })        for date_key, reactions in export_reactions.items():
+                }) 
+        for date_key, reactions in export_reactions.items():
             for rxn in reactions:
                 reactor = str(rxn.get("reactor_user_id"))
                 delta = rxn.get("delta", 0)
