@@ -21,6 +21,8 @@ __pycache__/
 # Data
 *.json
 !users_database.json
+database/
+*.db
 
 # Logs
 *.log
