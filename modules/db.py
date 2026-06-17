@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import asyncio
 
-DB_PATH = Path("../database/users_database.json")
+DB_PATH = Path(__file__).resolve().parent.parent / "users_database.json"
 
 # Кэш в памяти
 _database_cache = None
