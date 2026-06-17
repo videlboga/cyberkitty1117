@@ -23,6 +23,10 @@ from modules.export import process_export, build_global_export_csv_bytes
 ADMIN_ID = 648981358
 PAGE_SIZE = 5
 
+# Блокировки на уровне чата — предотвращают параллельный вызов LLM
+# для одного chat_id (корень race condition в daily_summary_job)
+_chat_locks: dict[str, asyncio.Lock] = {}
+
 logging.basicConfig(level=logging.INFO)
 
 # Initializing aiogram 3 components
@@ -593,20 +597,30 @@ async def daily_summary_job(bot: Bot):
                 target_topic_id = settings.get("summary_topic_id")
                 
                 if now.hour == target_hour and c_data.get("last_summary_date") != today:
-                    # Сохраняем last_summary_date ДО отправки — защита от дублей
-                    # при параллельных экземплярах бота
+                    # Блокировка на уровне чата — предотвращает параллельный вызов
+                    # LLM для одного chat_id внутри одного процесса
+                    lock = _chat_locks.setdefault(c_id, asyncio.Lock())
+                    async with lock:
+                        # Double-checked locking: перечитываем БД внутри лока
+                        db_fresh = load_database()
+                        c_data_fresh = db_fresh.get("chats", {}).get(c_id, {})
+                        if c_data_fresh.get("last_summary_date") == today:
+                            continue  # другой цикл уже обработал
+                        # Сохраняем last_summary_date ДО LLM — optimistic locking
+                        c_data_fresh["last_summary_date"] = today
+                        await save_database(db_fresh)
+                        summary = await get_summary_data(c_id, today, db_fresh)
+                        if summary:
+                            try:
+                                if target_topic_id:
+                                    await bot.send_message(c_id, summary, message_thread_id=target_topic_id)
+                                else:
+                                    await bot.send_message(c_id, summary)
+                            except Exception as e:
+                                logging.error(e)
+                    # Обновляем in-memory db для флага changed
                     c_data["last_summary_date"] = today
                     changed = True
-                    await save_database(db)
-                    summary = await get_summary_data(c_id, today, db)
-                    if summary:
-                        try:
-                            if target_topic_id:
-                                await bot.send_message(c_id, summary, message_thread_id=target_topic_id)
-                            else:
-                                await bot.send_message(c_id, summary)
-                        except Exception as e:
-                            logging.error(e)
             if changed: await save_database(db)
         except Exception as e:
             logging.error(e)
