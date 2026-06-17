@@ -13,6 +13,8 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 
 from modules.config import API_TOKEN as BOT_TOKEN
@@ -628,7 +630,16 @@ async def daily_summary_job(bot: Bot):
 
 
 async def main():
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # Use local Bot API server to avoid TelegramConflictError
+    # (proxy server runs telegram-bot-api on port 8081)
+    session = AiohttpSession(
+        api=TelegramAPIServer.from_base("http://127.0.0.1:8081")
+    )
+    bot = Bot(
+        token=BOT_TOKEN,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
     
     logging.info("Бот переведен на управление через ЛС.")
     asyncio.create_task(daily_summary_job(bot))
