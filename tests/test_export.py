@@ -47,4 +47,4 @@ def test_global_export():
     assert "Test Chat" in result_text
     
 if __name__ == "__main__":
-    test()
+    test_global_export()
