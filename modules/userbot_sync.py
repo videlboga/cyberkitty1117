@@ -19,11 +19,26 @@ API_ID = os.getenv("TELEGRAM_API_ID")
 API_HASH = os.getenv("TELEGRAM_API_HASH")
 SESSION_NAME = os.getenv("SESSION_NAME", "userbot_session")
 
+# SOCKS5 proxy for MTProto — required when direct connection is blocked by DPI
+SOCKS5_PROXY = os.getenv("SOCKS5_PROXY", "socks5://127.0.0.1:1080")
+proxy_dict = None
+if SOCKS5_PROXY:
+    # Parse socks5://host:port or host:port
+    proxy_str = SOCKS5_PROXY.replace("socks5://", "")
+    if ":" in proxy_str:
+        host, port = proxy_str.rsplit(":", 1)
+        proxy_dict = {
+            "scheme": "socks5",
+            "hostname": host,
+            "port": int(port)
+        }
+
 app = Client(
     SESSION_NAME,
     api_id=API_ID,
     api_hash=API_HASH,
-    ipv6=False  # IPv6 times out on proxy server; force IPv4
+    ipv6=False,  # IPv6 times out on proxy server; force IPv4
+    proxy=proxy_dict
 )
 
 async def record_membership_event(chat_id: int, user_id: int, username: str, action: str, event_date: datetime):
