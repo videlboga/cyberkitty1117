@@ -208,12 +208,39 @@ async def cb_summary_group(callback_query: CallbackQuery, bot: Bot):
     
     if not is_admin(user_id, chat_id_str, db): return
     
-    summary = await get_summary_data(chat_id_str, date_str, db)
-    if summary:
-        await bot.send_message(callback_query.message.chat.id, f"✅ Сводка за {date_str} собрана:")
-        await bot.send_message(callback_query.message.chat.id, summary)
-    else:
-        await bot.send_message(callback_query.message.chat.id, f"ℹ️ В группе за {date_str} сообщений нет.")
+    # Защита от двойного клика: проверяем generating_lock
+    if 'chats' not in db: db['chats'] = {}
+    if chat_id_str not in db['chats']: db['chats'][chat_id_str] = {}
+    chat_data = db['chats'][chat_id_str]
+    if chat_data.get('generating_lock'):
+        await callback_query.answer("Уже собираю сводку, подождите...", show_alert=True)
+        return
+    
+    # Ставим лок и отключаем кнопку на время генерации
+    chat_data['generating_lock'] = True
+    await save_database(db)
+    try:
+        await bot.edit_message_reply_markup(
+            callback_query.message.chat.id,
+            callback_query.message.message_id,
+            reply_markup=None
+        )
+    except Exception:
+        pass
+    
+    try:
+        summary = await get_summary_data(chat_id_str, date_str, db)
+        if summary:
+            await bot.send_message(callback_query.message.chat.id, f"✅ Сводка за {date_str} собрана:")
+            await bot.send_message(callback_query.message.chat.id, summary)
+        else:
+            await bot.send_message(callback_query.message.chat.id, f"ℹ️ В группе за {date_str} сообщений нет.")
+    finally:
+        # Снимаем лок после завершения (успех или ошибка)
+        db = load_database()
+        chat_data = db.get('chats', {}).get(chat_id_str, {})
+        chat_data.pop('generating_lock', None)
+        await save_database(db)
 
 @dp.callback_query(F.data.startswith('export:'))
 async def cb_export_group(callback_query: CallbackQuery):
@@ -566,6 +593,11 @@ async def daily_summary_job(bot: Bot):
                 target_topic_id = settings.get("summary_topic_id")
                 
                 if now.hour == target_hour and c_data.get("last_summary_date") != today:
+                    # Сохраняем last_summary_date ДО отправки — защита от дублей
+                    # при параллельных экземплярах бота
+                    c_data["last_summary_date"] = today
+                    changed = True
+                    await save_database(db)
                     summary = await get_summary_data(c_id, today, db)
                     if summary:
                         try:
@@ -573,8 +605,6 @@ async def daily_summary_job(bot: Bot):
                                 await bot.send_message(c_id, summary, message_thread_id=target_topic_id)
                             else:
                                 await bot.send_message(c_id, summary)
-                            c_data["last_summary_date"] = today
-                            changed = True
                         except Exception as e:
                             logging.error(e)
             if changed: await save_database(db)
