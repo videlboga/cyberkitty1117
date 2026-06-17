@@ -19,7 +19,12 @@ API_ID = os.getenv("TELEGRAM_API_ID")
 API_HASH = os.getenv("TELEGRAM_API_HASH")
 SESSION_NAME = os.getenv("SESSION_NAME", "userbot_session")
 
-app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH)
+app = Client(
+    SESSION_NAME,
+    api_id=API_ID,
+    api_hash=API_HASH,
+    ipv6=False  # IPv6 times out on proxy server; force IPv4
+)
 
 async def record_membership_event(chat_id: int, user_id: int, username: str, action: str, event_date: datetime):
     """Сохраняет событие подписки/отписки в общую БД бота."""
