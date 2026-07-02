@@ -120,3 +120,19 @@ def test_invalid_value_skipped(monkeypatch):
     create_kwargs = openai.chat.completions.create.call_args.kwargs
     assert "max_tokens" not in create_kwargs
     assert "temperature" not in create_kwargs
+
+
+def test_returns_none_on_all_failures(monkeypatch):
+    """После 3 неудачных попыток ask_llm возвращает None (не пустую строку)."""
+    import modules.llm_client as lc
+
+    cfg = _make_config({'text_model': 'm1'})
+    monkeypatch.setattr(lc, "config", cfg)
+    openai = MagicMock()
+    openai.chat.completions.create.side_effect = RuntimeError("boom")
+    monkeypatch.setattr(lc, "openai", openai)
+
+    result = _run(lc.ask_llm("cond", "data"))
+
+    assert result is None
+    assert openai.chat.completions.create.call_count == 3

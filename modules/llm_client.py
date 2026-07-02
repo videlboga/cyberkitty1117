@@ -14,7 +14,8 @@ async def ask_llm(condition_text, channel_text_data):
        параметрами `model`, `messages`, `stream=True`.
     2. Если `stream=True`, то функция должна склеить все `delta.content` из пришедших
        чанков и вернуть готовую строку.
-    3. В случае пустых/неполных данных возвращает пустую строку.
+    3. При пустых/неполных данных или после 3 неудачных попыток возвращает None
+       (не пустую строку).
     4. При исключениях делает до 3 попыток, после чего возвращает None.
     """
 
@@ -76,4 +77,4 @@ async def ask_llm(condition_text, channel_text_data):
         except Exception as e:
             print(f"Ошибка при обращении к OpenRouter (попытка {attempt+1}): {e}")
 
-    return "" 
+    return None
