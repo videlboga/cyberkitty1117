@@ -21,8 +21,8 @@ from modules.config import API_TOKEN as BOT_TOKEN
 from modules.db import load_database, save_database
 from modules.summary import save_message_to_database, get_summary_data
 from modules.export import process_export, build_global_export_csv_bytes
+from modules.roles import is_superadmin, is_admin, get_admin_groups, ADMIN_ID
 
-ADMIN_ID = 648981358
 PAGE_SIZE = 5
 
 # Блокировки на уровне чата — предотвращают параллельный вызов LLM
@@ -45,24 +45,6 @@ async def safe_answer_callback(callback_query: CallbackQuery, text: str | None =
     except Exception as e:
         logging.warning(f"Ignored callback answer error: {e}")
 
-def is_superadmin(user_id, db):
-    return str(user_id) in db.get('superadmins', [str(ADMIN_ID)])
-
-def is_admin(user_id, chat_id_str, db):
-    if is_superadmin(user_id, db): return True
-    return str(user_id) in db.get('chats', {}).get(chat_id_str, {}).get('admins', [])
-
-def get_admin_groups(user_id, db):
-    """Список групп, в которых юзер админ или суперадмин."""
-    is_sa = is_superadmin(user_id, db)
-    groups = {}
-    for cid, cdata in db.get('chats', {}).items():
-        if str(user_id) in cdata.get('admins', []) or is_sa:
-            title = cdata.get('title', f"Группа {cid}")
-            if title == cid or str(title).startswith('-'):
-                title = f"Чат {cid}"
-            groups[cid] = title
-    return groups
 
 def _build_group_page_kb(groups: dict, page: int):
     """Build paginated inline keyboard for group list."""
