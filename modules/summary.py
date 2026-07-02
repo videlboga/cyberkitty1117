@@ -3,8 +3,53 @@
 Модуль для создания суммаризаций сообщений (Core V2 Schema).
 """
 
-import ast
+import json
+import re
 from .llm_client import ask_llm
+
+
+def _parse_llm_response(text):
+    """Безопасно разбирает ответ LLM в dict.
+
+    Шаги:
+    1. Возвращает None, если на входе None или пусто.
+    2. Очищает от markdown-обёрток (```json / ```python / ```).
+    3. Пытается json.loads.
+    4. При неудаче извлекает первый {...}-блок регуляркой и снова json.loads.
+    5. Если ничего не получилось — возвращает None.
+
+    Возвращает dict, либо None.
+    """
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s:
+        return None
+
+    # Снимаем markdown-fence ```json ... ``` / ```python ... ``` / ``` ... ```
+    fence = re.search(r"```(?:json|python)?\s*(.*?)```", s, re.DOTALL | re.IGNORECASE)
+    if fence:
+        s = fence.group(1).strip()
+
+    # Прямой парсинг
+    try:
+        value = json.loads(s)
+        if isinstance(value, dict):
+            return value
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Fallback: найти первый {...}-блок
+    match = re.search(r"\{.*\}", s, re.DOTALL)
+    if match:
+        try:
+            value = json.loads(match.group(0))
+            if isinstance(value, dict):
+                return value
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return None
 
 
 def _format_messages_for_llm(forming_data, database):
@@ -86,8 +131,13 @@ async def get_summary_data(chat_id, data_needed, database):
     for i in range(2):
         try:
             llm_answer = await ask_llm(all_condition_text, _format_messages_for_llm(forming_data, database))
-            dict_info = ast.literal_eval(llm_answer)
-            break
+            if llm_answer is None:
+                print(f"Пустой ответ LLM при получении тем (попытка {i+1})")
+                continue
+            dict_info = _parse_llm_response(llm_answer)
+            if dict_info is not None:
+                break
+            print(f"Не удалось разобрать ответ LLM тем (попытка {i+1})")
         except Exception as e:
             print(f"Ошибка при получении тем (попытка {i+1}): {e}")
 
@@ -95,8 +145,13 @@ async def get_summary_data(chat_id, data_needed, database):
     for i in range(2):
         try:
             llm_answer = await ask_llm(all_links_condition, _format_texts_for_links(only_text))
-            links_data = ast.literal_eval(llm_answer)
-            break
+            if llm_answer is None:
+                print(f"Пустой ответ LLM при получении ссылок (попытка {i+1})")
+                continue
+            links_data = _parse_llm_response(llm_answer)
+            if links_data is not None:
+                break
+            print(f"Не удалось разобрать ответ LLM ссылок (попытка {i+1})")
         except Exception as e:
             print(f"Ошибка при получении ссылок (попытка {i+1}): {e}")
     
