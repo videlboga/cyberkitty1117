@@ -7,6 +7,32 @@ import ast
 from .llm_client import ask_llm
 
 
+def _format_messages_for_llm(forming_data, database):
+    """Форматирует list[dict] сообщений в читаемую строку для LLM.
+
+    Формат: '[1] username: text (link)\\n[2] ...'
+    Использует text_in_msg и link_to_message; не передаёт user_id/timestamp.
+    username берётся из database['users'][user_id]['username'] с .get fallback.
+    """
+    users = database.get('users', {})
+    lines = []
+    for idx, msg in enumerate(forming_data, start=1):
+        user_id = msg.get('user_id')
+        username = users.get(user_id, {}).get('username', 'Unknown')
+        text = msg.get('text_in_msg', '') or ''
+        link = msg.get('link_to_message', '') or ''
+        lines.append(f'[{idx}] {username}: {text} ({link})')
+    return '\n'.join(lines)
+
+
+def _format_texts_for_links(only_text):
+    """Объединяет список текстов в строку для промпта поиска ссылок.
+
+    Оставляет только тексты (без словарной структуры).
+    """
+    return '\n'.join(t for t in only_text if t)
+
+
 async def get_summary_data(chat_id, data_needed, database):
     """Получает суммаризованные данные за определенную дату по новой схеме."""
     chat_id_str = str(chat_id)
@@ -59,7 +85,7 @@ async def get_summary_data(chat_id, data_needed, database):
     # Получаем информацию о темах
     for i in range(2):
         try:
-            llm_answer = await ask_llm(all_condition_text, forming_data)
+            llm_answer = await ask_llm(all_condition_text, _format_messages_for_llm(forming_data, database))
             dict_info = ast.literal_eval(llm_answer)
             break
         except Exception as e:
@@ -68,7 +94,7 @@ async def get_summary_data(chat_id, data_needed, database):
     # Получаем информацию о ссылках
     for i in range(2):
         try:
-            llm_answer = await ask_llm(all_links_condition, only_text)
+            llm_answer = await ask_llm(all_links_condition, _format_texts_for_links(only_text))
             links_data = ast.literal_eval(llm_answer)
             break
         except Exception as e:
