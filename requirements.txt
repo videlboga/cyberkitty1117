@@ -4,3 +4,5 @@ openai
 python-dotenv
 httpx
 asgiref
+gspread>=6.0
+google-auth>=2.0
