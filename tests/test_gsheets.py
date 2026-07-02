@@ -153,3 +153,91 @@ def test_sanitize_sheet_title_empty_after_strip():
 
 def test_sanitize_sheet_title_no_forbidden_chars():
     assert gsheets.sanitize_sheet_title('Общая статистика') == 'Общая статистика'
+
+
+def test_create_admin_spreadsheet_returns_id_and_persists(monkeypatch):
+    import asyncio
+    from unittest.mock import MagicMock
+
+    fake_sh = MagicMock()
+    fake_sh.id = 'SPREADSHEET_ID_123'
+    fake_gc = MagicMock()
+    fake_gc.create.return_value = fake_sh
+
+    monkeypatch.setattr(gsheets, '_gc', fake_gc)
+
+    saved = {}
+
+    async def fake_save(data=None):
+        saved['data'] = data
+
+    monkeypatch.setattr(gsheets, 'save_database', fake_save)
+
+    db = {'users': {}}
+
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.create_admin_spreadsheet(648981358, 'andrey', db)
+        )
+    finally:
+        loop.close()
+
+    assert sid == 'SPREADSHEET_ID_123'
+    fake_gc.create.assert_called_once_with('Summary Bot — andrey')
+    assert db['users']['648981358']['spreadsheet_id'] == 'SPREADSHEET_ID_123'
+    assert saved.get('data') is db
+
+
+def test_create_admin_spreadsheet_creates_user_record(monkeypatch):
+    import asyncio
+    from unittest.mock import MagicMock
+
+    fake_sh = MagicMock()
+    fake_sh.id = 'SID_2'
+    fake_gc = MagicMock()
+    fake_gc.create.return_value = fake_sh
+
+    monkeypatch.setattr(gsheets, '_gc', fake_gc)
+
+    async def fake_save(data=None):
+        pass
+
+    monkeypatch.setattr(gsheets, 'save_database', fake_save)
+
+    # No 'users' key at all — function must create it lazily.
+    db = {}
+
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.create_admin_spreadsheet(42, 'neo', db)
+        )
+    finally:
+        loop.close()
+
+    assert sid == 'SID_2'
+    assert db['users']['42']['spreadsheet_id'] == 'SID_2'
+
+
+def test_create_admin_spreadsheet_none_when_no_client(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(gsheets, '_gc', None)
+
+    async def fake_save(data=None):
+        raise AssertionError('save_database must not be called without a client')
+
+    monkeypatch.setattr(gsheets, 'save_database', fake_save)
+
+    db = {'users': {}}
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.create_admin_spreadsheet(1, 'x', db)
+        )
+    finally:
+        loop.close()
+
+    assert sid is None
+    assert db['users'] == {}

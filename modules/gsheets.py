@@ -252,3 +252,44 @@ def _write_summary_tab(sh, group_rows: list):
 
     header = ['Группа', 'Всего сообщений', 'Всего юзеров', 'Всего реакций']
     summary_ws.update([header] + list(group_rows))
+
+
+async def create_admin_spreadsheet(admin_user_id, admin_username, db):
+    """Create a per-admin Google Spreadsheet and persist its id in the DB.
+
+    Creates a new spreadsheet titled ``Summary Bot — {admin_username}`` via the
+    gspread client, stores the resulting ``spreadsheet_id`` into
+    ``db['users'][str(admin_user_id)]['spreadsheet_id']`` (creating the user
+    record lazily if it does not yet exist), and persists the database with
+    ``await save_database(db)``.
+
+    gspread is synchronous, so the blocking ``gc.create`` call is wrapped in
+    ``asyncio.to_thread`` to avoid blocking the bot's event loop.
+
+    Args:
+        admin_user_id: Telegram user id (int or str) of the admin.
+        admin_username: Telegram username (str) used in the sheet title.
+        db: the in-memory database dict (same shape as ``load_database()``).
+
+    Returns:
+        The new spreadsheet id (str) on success, or ``None`` when the gspread
+        client is unavailable (missing credentials / gspread not installed).
+    """
+    gc = _get_client()
+    if gc is None:
+        return None
+
+    title = f'Summary Bot — {admin_username}'
+    sh = await asyncio.to_thread(gc.create, title)
+    sid = sh.id
+
+    uid_str = str(admin_user_id)
+    users = db.setdefault('users', {})
+    if uid_str not in users or not isinstance(users.get(uid_str), dict):
+        users[uid_str] = {}
+    users[uid_str]['spreadsheet_id'] = sid
+
+    await save_database(db)
+
+    logging.info("Sheets: created spreadsheet %s for admin %s (%s)", sid, admin_user_id, admin_username)
+    return sid
