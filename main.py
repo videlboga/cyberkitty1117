@@ -23,6 +23,15 @@ from modules.summary import save_message_to_database, get_summary_data
 from modules.export import process_export, build_global_export_csv_bytes
 from modules.roles import is_superadmin, is_admin, get_admin_groups, ADMIN_ID
 
+try:
+    from modules.gsheets import get_or_create_admin_spreadsheet, update_admin_spreadsheet
+    _SHEETS_SYNC_AVAILABLE = True
+except ImportError as e:
+    get_or_create_admin_spreadsheet = None
+    update_admin_spreadsheet = None
+    _SHEETS_SYNC_AVAILABLE = False
+    logging.warning(f"Sheets sync выключен (gsheets import failed): {e}")
+
 PAGE_SIZE = 5
 
 # Блокировки на уровне чата — предотвращают параллельный вызов LLM
@@ -611,6 +620,42 @@ async def daily_summary_job(bot: Bot):
         await asyncio.sleep(60)
 
 
+async def sheets_sync_job(bot: Bot):
+    """Фоновый воркер синхронизации админских таблиц Google Sheets.
+
+    Запускается отложенно (через 15 с после старта бота), затем каждые 30 мин
+    обходит всех админов (объединение superadmins и chats[*].admins),
+    вызывает get_or_create_admin_spreadsheet для каждого. Ошибки по одному
+    админу логируются и не роняют воркер; исключение во внешнем цикле тоже
+    логируется, после чего воркер засыпает до следующей итерации.
+    """
+    await asyncio.sleep(15)
+    if not _SHEETS_SYNC_AVAILABLE:
+        logging.info("Sheets sync воркер остановлен: модуль gsheets недоступен.")
+        return
+    logging.info("Sheets sync воркер запущен.")
+    while True:
+        try:
+            db = load_database()
+            all_admins = set(db.get('superadmins', [])) | {
+                a for c in db.get('chats', {}).values() for a in c.get('admins', [])
+            }
+            for aid in all_admins:
+                if not aid:
+                    continue
+                try:
+                    sid = await get_or_create_admin_spreadsheet(aid, db)
+                    if sid is None:
+                        logging.warning(f'Sheets sync: admin={aid} пропущен (нет клиента/учётных данных)')
+                    else:
+                        logging.info(f'Sheets sync: admin={aid} ok')
+                except Exception as e:
+                    logging.error(f'Sheets sync failed for {aid}: {e}', exc_info=True)
+        except Exception as e:
+            logging.error(f'Sheets sync outer error: {e}', exc_info=True)
+        await asyncio.sleep(1800)
+
+
 async def main():
     # Use local Bot API server to avoid TelegramConflictError
     # (proxy server runs telegram-bot-api on port 8081)
@@ -625,6 +670,7 @@ async def main():
     
     logging.info("Бот переведен на управление через ЛС.")
     asyncio.create_task(daily_summary_job(bot))
+    asyncio.create_task(sheets_sync_job(bot))
     
     # Polling limits can be added via allowed_updates.
     # To receive reactions updates, we must enable message_reaction in allowed_updates.
