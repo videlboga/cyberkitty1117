@@ -322,6 +322,48 @@ def test_forming_data_username_fallback_unknown():
     assert "{" not in data
 
 
+# ---------------------------------------------------------------------------
+# Тесты устойчивости get_summary_data к None/garbage от ask_llm.
+# ask_llm может вернуть None (пустой ответ) или невалидную строку — бот не
+# должен падать, функция возвращает None.
+# ---------------------------------------------------------------------------
+
+def _one_msg_db():
+    """db с одним чатом и одним сообщением — минимальный сценарий для None."""
+    date = "2023-05-18"
+    messages = [
+        {"user_id": "1", "link_to_message": "https://t.me/c/1/1",
+         "timestamp": "2023-05-18 10:00:00", "text_in_msg": "тест"}
+    ]
+    return _make_db_with_chat("-100123", date, messages), date
+
+
+def test_ask_llm_none_returns_none_no_exception():
+    """ask_llm возвращает None → get_summary_data возвращает None, не падает."""
+    db, date = _one_msg_db()
+
+    async def _none(condition_text, channel_text_data):
+        return None
+
+    with patch("modules.summary.ask_llm", new=AsyncMock(side_effect=_none)):
+        result = _run_async(get_summary_data("-100123", date, db))
+
+    assert result is None
+
+
+def test_ask_llm_garbage_returns_none_no_exception():
+    """ask_llm возвращает 'garbage' (невалидный ответ) → None, не падает."""
+    db, date = _one_msg_db()
+
+    async def _garbage(condition_text, channel_text_data):
+        return "garbage"
+
+    with patch("modules.summary.ask_llm", new=AsyncMock(side_effect=_garbage)):
+        result = _run_async(get_summary_data("-100123", date, db))
+
+    assert result is None
+
+
 if __name__ == "__main__":
     test_parse_valid_json_string()
     test_parse_json_in_markdown_fence()
@@ -339,4 +381,6 @@ if __name__ == "__main__":
     test_forming_data_contains_indexed_username_text_link()
     test_forming_data_no_user_id_no_timestamp()
     test_forming_data_username_fallback_unknown()
+    test_ask_llm_none_returns_none_no_exception()
+    test_ask_llm_garbage_returns_none_no_exception()
     print("\nAll summary tests PASSED")
