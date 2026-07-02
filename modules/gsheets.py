@@ -73,3 +73,127 @@ def _get_client():
 
     logging.info("modules.gsheets: gspread client initialized from %s", creds_path)
     return _gc
+
+
+def compute_user_stats(chat_data: dict, args: list = None, db: dict = None) -> dict:
+    """Aggregate per-user statistics for a single chat.
+
+    Reproduces the aggregation logic of ``modules/export.py::process_export``
+    for the ``len(args) == 0`` branch (i.e. "за всё время" — all dates in
+    history), and additionally tracks each user's last message text.
+
+    NOTE: Per RESEARCH.md, the aggregation helper could be factored out of
+    ``export.py`` so that both the CSV exporter and the Sheets exporter share
+    one implementation (option (a)). This task explicitly chooses option (b)
+    — copying the logic into ``gsheets.py`` — to avoid touching ``export.py``
+    and risking changes to the existing CSV behaviour. The two implementations
+    must be kept consistent; if ``export.py`` aggregation changes, mirror it
+    here.
+
+    Args:
+        chat_data: ``db['chats'][cid]`` dict with ``history`` and
+            ``reactions`` sub-dicts keyed by date.
+        args: period filter. When ``None`` or ``[]`` the full history is used,
+            matching ``process_export``'s all-time branch. Only the empty-args
+            branch is used by the Sheets worker today, but the signature keeps
+            ``args`` for parity with ``process_export`` and future reuse.
+        db: database dict (unused for aggregation itself, present for API
+            symmetry with ``process_export``).
+
+    Returns:
+        ``{uid_str: {messages, reactions_given, reactions_received, last_text}}``.
+        ``last_text`` is the text of the message with the maximum ``timestamp``
+        for that user, resolved as
+        ``msg.get('text_in_msg', '') or msg.get('text', '') or '[Медиа/Без текста]'``.
+        Users that only appear in reactions (never sent a message) have
+        ``last_text = ''``.
+    """
+    if args is None:
+        args = []
+    if db is None:
+        db = {}
+
+    history = chat_data.get('history', {})
+    reactions_db = chat_data.get('reactions', {})
+
+    # All-time branch (mirrors process_export when len(args) == 0)
+    export_history = history if len(args) == 0 else {}
+    export_reactions = reactions_db if len(args) == 0 else {}
+
+    user_stats = {}
+    # message_id -> author uid, used to credit received reactions
+    msg_author_map = {}
+    # uid -> (max_timestamp, text) of the most recent message for last_text
+    last_msg_by_uid = {}
+
+    # 1. Walk all messages
+    for date_key, messages in export_history.items():
+        for msg in messages:
+            uid = str(msg.get('user_id'))
+            link = msg.get('link_to_message', '')
+
+            # Extract message_id from the link's last path segment
+            msg_id = None
+            if link:
+                parts = link.split('/')
+                if len(parts) > 0 and parts[-1].isdigit():
+                    msg_id = int(parts[-1])
+
+            if uid not in user_stats:
+                user_stats[uid] = {
+                    'messages': 0,
+                    'reactions_given': 0,
+                    'reactions_received': 0,
+                    'last_text': '',
+                }
+
+            user_stats[uid]['messages'] += 1
+            if msg_id:
+                msg_author_map[msg_id] = uid
+
+            # Resolve message text with the same fallback as export.py
+            msg_text = msg.get('text_in_msg', '') or msg.get('text', '')
+            if not msg_text:
+                msg_text = '[Медиа/Без текста]'
+
+            # Track the most recent message per user by timestamp
+            ts = msg.get('timestamp', date_key)
+            prev = last_msg_by_uid.get(uid)
+            if prev is None or ts >= prev[0]:
+                last_msg_by_uid[uid] = (ts, msg_text)
+
+    # Apply last_text to each user that sent at least one message
+    for uid, (_ts, text) in last_msg_by_uid.items():
+        user_stats[uid]['last_text'] = text
+
+    # 2. Walk all reactions (who reacted to whom)
+    for _date_key, reactions in export_reactions.items():
+        for rxn in reactions:
+            reactor = str(rxn.get('reactor_user_id'))
+            delta = rxn.get('delta', 0)
+            msg_id = rxn.get('message_id')
+
+            if delta > 0:
+                # reactor gave a reaction
+                if reactor not in user_stats:
+                    user_stats[reactor] = {
+                        'messages': 0,
+                        'reactions_given': 0,
+                        'reactions_received': 0,
+                        'last_text': '',
+                    }
+                user_stats[reactor]['reactions_given'] += delta
+
+                # message author received a reaction
+                author = msg_author_map.get(msg_id)
+                if author:
+                    if author not in user_stats:
+                        user_stats[author] = {
+                            'messages': 0,
+                            'reactions_given': 0,
+                            'reactions_received': 0,
+                            'last_text': '',
+                        }
+                    user_stats[author]['reactions_received'] += delta
+
+    return user_stats
