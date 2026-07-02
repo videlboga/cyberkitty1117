@@ -241,3 +241,154 @@ def test_create_admin_spreadsheet_none_when_no_client(monkeypatch):
 
     assert sid is None
     assert db['users'] == {}
+
+
+def _build_chat_data():
+    """Return a minimal chat_data with history + reactions matching DB schema."""
+    return {
+        'history': {
+            '2026-01-01': [
+                {
+                    'user_id': '100',
+                    'link_to_message': 'https://t.me/c/1/10',
+                    'text_in_msg': 'hello',
+                    'timestamp': '2026-01-01T10:00:00',
+                },
+                {
+                    'user_id': '200',
+                    'link_to_message': 'https://t.me/c/1/11',
+                    'text': 'world',
+                    'timestamp': '2026-01-01T11:00:00',
+                },
+                {
+                    'user_id': '100',
+                    'link_to_message': 'https://t.me/c/1/12',
+                    'text_in_msg': '',
+                    'timestamp': '2026-01-01T12:00:00',
+                },
+            ],
+        },
+        'reactions': {
+            '2026-01-01': [
+                {'reactor_user_id': '200', 'message_id': 10, 'delta': 1},
+                {'reactor_user_id': '100', 'message_id': 11, 'delta': 2},
+            ],
+        },
+    }
+
+
+def test_write_group_tab_creates_worksheet_and_writes_rows():
+    from unittest.mock import MagicMock
+
+    sh = MagicMock()
+    existing = MagicMock()
+    existing.title = 'Other Tab'
+    sh.worksheets.return_value = [existing]
+    new_ws = MagicMock()
+    sh.add_worksheet.return_value = new_ws
+
+    db = {
+        'users': {
+            '100': {'username': 'alice'},
+            '200': {'username': 'bob'},
+        },
+        'chats': {},
+    }
+
+    gsheets._write_group_tab(sh, 'Group A', _build_chat_data(), db)
+
+    # Should have scanned existing tabs and created a new one.
+    sh.add_worksheet.assert_called_once_with('Group A', rows=100, cols=6)
+    new_ws.clear.assert_called_once()
+
+    # Inspect the rows written via ws.update.
+    assert new_ws.update.called
+    rows = new_ws.update.call_args.args[0]
+    header = rows[0]
+    assert header == [
+        'Дата',
+        'Пользователь',
+        'Сообщений',
+        'Реакций поставлено',
+        'Реакций получено',
+        'Текст последнего сообщения',
+    ]
+
+    # Two data rows, sorted by messages desc.
+    data_rows = rows[1:]
+    assert len(data_rows) == 2
+    # alice (100): 2 messages, 2 reactions given, 1 received, last text '[Медиа/Без текста]'
+    # bob   (200): 1 message,  1 reaction given,  2 received, last text 'world'
+    by_user = {r[1]: r for r in data_rows}
+    alice = by_user['alice']
+    assert alice[0] == ''  # Дата placeholder
+    assert alice[2] == 2
+    assert alice[3] == 2
+    assert alice[4] == 1
+    assert alice[5] == '[Медиа/Без текста]'
+
+    bob = by_user['bob']
+    assert bob[2] == 1
+    assert bob[3] == 1
+    assert bob[4] == 2
+    assert bob[5] == 'world'
+
+    # Sorted by messages desc → alice (2) before bob (1).
+    assert data_rows[0][1] == 'alice'
+    assert data_rows[1][1] == 'bob'
+
+
+def test_write_group_tab_reuses_existing_worksheet():
+    from unittest.mock import MagicMock
+
+    existing = MagicMock()
+    existing.title = 'Group A'
+    sh = MagicMock()
+    sh.worksheets.return_value = [existing]
+
+    db = {'users': {}, 'chats': {}}
+
+    gsheets._write_group_tab(sh, 'Group A', _build_chat_data(), db)
+
+    # Must NOT add a new worksheet — reuse the existing one.
+    sh.add_worksheet.assert_not_called()
+    existing.clear.assert_called_once()
+    assert existing.update.called
+
+
+def test_write_group_tab_username_fallback_to_id():
+    from unittest.mock import MagicMock
+
+    sh = MagicMock()
+    new_ws = MagicMock()
+    sh.worksheets.return_value = []
+    sh.add_worksheet.return_value = new_ws
+
+    # No users record for uid '100' → fallback to 'ID:100'.
+    db = {'users': {}, 'chats': {}}
+
+    gsheets._write_group_tab(sh, 'Group X', _build_chat_data(), db)
+
+    rows = new_ws.update.call_args.args[0]
+    data_rows = rows[1:]
+    usernames = {r[1] for r in data_rows}
+    assert 'ID:100' in usernames
+    assert 'ID:200' in usernames
+
+
+def test_write_group_tab_empty_chat():
+    from unittest.mock import MagicMock
+
+    sh = MagicMock()
+    new_ws = MagicMock()
+    sh.worksheets.return_value = []
+    sh.add_worksheet.return_value = new_ws
+
+    db = {'users': {}, 'chats': {}}
+
+    gsheets._write_group_tab(sh, 'Empty', {'history': {}, 'reactions': {}}, db)
+
+    rows = new_ws.update.call_args.args[0]
+    # Only the header row, no data rows.
+    assert len(rows) == 1
+    assert rows[0][2] == 'Сообщений'

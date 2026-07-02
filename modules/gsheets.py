@@ -254,6 +254,74 @@ def _write_summary_tab(sh, group_rows: list):
     summary_ws.update([header] + list(group_rows))
 
 
+def _write_group_tab(sh, tab_title, chat_data, db):
+    """Write a per-group statistics tab into spreadsheet ``sh``.
+
+    Finds an existing worksheet named ``tab_title`` (clearing it in place for
+    idempotent updates, per RESEARCH.md) or creates it via ``sh.add_worksheet``
+    (after scanning ``sh.worksheets()`` to avoid creating a duplicate tab),
+    then writes the header row followed by one row per user.
+
+    Per-user rows are produced by ``compute_user_stats(chat_data, [], db)``
+    (the all-time branch) and sorted by message count descending. The row
+    shape is ``[Дата, Пользователь, Сообщений, Реакций поставлено,
+    Реакций получено, Текст последнего сообщения]``.
+
+    NOTE: ``compute_user_stats`` does not currently track a per-user date, so
+    the ``Дата`` column is written as an empty string. The column is kept in
+    the header (per the task spec) for a coherent sheet layout; filling it
+    requires extending ``compute_user_stats`` in a follow-up.
+
+    Purely synchronous — meant to run inside ``asyncio.to_thread`` by the async
+    public caller (``update_admin_spreadsheet``). Does not call
+    ``asyncio.to_thread`` itself.
+
+    Args:
+        sh: an open gspread ``Spreadsheet``.
+        tab_title: sanitized, unique tab title for this group.
+        chat_data: ``db['chats'][cid]`` dict with ``history`` and
+            ``reactions`` sub-dicts keyed by date.
+        db: the in-memory database dict (used for username resolution via
+            ``db['users'][uid]['username']``).
+    """
+    ws = None
+    for existing in sh.worksheets():
+        if existing.title == tab_title:
+            ws = existing
+            break
+
+    if ws is None:
+        ws = sh.add_worksheet(tab_title, rows=100, cols=6)
+
+    ws.clear()
+
+    header = [
+        'Дата',
+        'Пользователь',
+        'Сообщений',
+        'Реакций поставлено',
+        'Реакций получено',
+        'Текст последнего сообщения',
+    ]
+
+    stats = compute_user_stats(chat_data, [], db)
+    users_db = db.get('users', {})
+
+    rows = [header]
+    for uid, s in sorted(stats.items(), key=lambda kv: kv[1]['messages'], reverse=True):
+        username = users_db.get(uid, {}).get('username', f'ID:{uid}')
+        rows.append([
+            '',  # Дата — not tracked by compute_user_stats (see note above)
+            username,
+            s['messages'],
+            s['reactions_given'],
+            s['reactions_received'],
+            s['last_text'],
+        ])
+
+    ws.update(rows)
+
+
 async def create_admin_spreadsheet(admin_user_id, admin_username, db):
     """Create a per-admin Google Spreadsheet and persist its id in the DB.
 
