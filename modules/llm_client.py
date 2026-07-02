@@ -25,7 +25,7 @@ async def ask_llm(condition_text, channel_text_data):
 
     print("Отправляю запрос в ChatGPT")
 
-    model_name = config['Settings'].get('text_model', 'gpt-3.5-turbo')
+    model_name = config['Settings'].get('text_model', 'deepseek/deepseek-v4-flash')
 
     for attempt in range(3):
         try:
