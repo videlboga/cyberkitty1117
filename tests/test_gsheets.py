@@ -673,3 +673,208 @@ def test_get_or_create_admin_spreadsheet_none_when_create_fails(monkeypatch):
 
     assert sid is None
     assert update_calls == []  # update must not run when create failed
+
+
+# ---------------------------------------------------------------------------
+# Integrated scenario with a synthetic 2-chat database (history + reactions +
+# users) exercising create -> update -> get_or_create end-to-end via the mock
+# gspread client. Matches the RESEARCH.md DB schema and acceptance criteria 9.
+# ---------------------------------------------------------------------------
+
+
+def _build_two_chat_db():
+    """Synthetic db with 2 chats, history, reactions, users (RESEARCH.md schema)."""
+    return {
+        'superadmins': ['648981358'],
+        'chats': {
+            '-100111': {
+                'title': 'Alpha',
+                'admins': [],
+                'history': {
+                    '2026-02-01': [
+                        {
+                            'user_id': '100',
+                            'link_to_message': 'https://t.me/c/1/21',
+                            'text_in_msg': 'hi',
+                            'timestamp': '2026-02-01T09:00:00',
+                        },
+                        {
+                            'user_id': '200',
+                            'link_to_message': 'https://t.me/c/1/22',
+                            'text_in_msg': 'yo',
+                            'timestamp': '2026-02-01T10:00:00',
+                        },
+                    ],
+                },
+                'reactions': {
+                    '2026-02-01': [
+                        {'reactor_user_id': '200', 'message_id': 21, 'delta': 1},
+                    ],
+                },
+            },
+            '-100222': {
+                'title': 'Beta',
+                'admins': [],
+                'history': {
+                    '2026-02-02': [
+                        {
+                            'user_id': '100',
+                            'link_to_message': 'https://t.me/c/2/31',
+                            'text_in_msg': 'hey',
+                            'timestamp': '2026-02-02T11:00:00',
+                        },
+                    ],
+                },
+                'reactions': {
+                    '2026-02-02': [
+                        {'reactor_user_id': '100', 'message_id': 31, 'delta': 1},
+                    ],
+                },
+            },
+        },
+        'users': {
+            '100': {'username': 'alice'},
+            '200': {'username': 'bob'},
+            '648981358': {'username': 'andrey'},
+        },
+    }
+
+
+def test_integrated_create_persists_sid_in_two_chat_db(monkeypatch):
+    import asyncio
+    from unittest.mock import MagicMock
+
+    fake_sh = MagicMock()
+    fake_sh.id = 'INT_SID'
+    fake_gc = MagicMock()
+    fake_gc.create.return_value = fake_sh
+
+    monkeypatch.setattr(gsheets, '_gc', fake_gc)
+
+    async def fake_save(data=None):
+        pass
+
+    monkeypatch.setattr(gsheets, 'save_database', fake_save)
+
+    db = _build_two_chat_db()
+
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.create_admin_spreadsheet(648981358, 'andrey', db)
+        )
+    finally:
+        loop.close()
+
+    assert sid == 'INT_SID'
+    fake_gc.create.assert_called_once_with('Summary Bot — andrey')
+    assert db['users']['648981358']['spreadsheet_id'] == 'INT_SID'
+
+
+def test_integrated_update_two_chats_creates_group_tabs_and_summary(monkeypatch):
+    import asyncio
+    from unittest.mock import MagicMock
+
+    group_ws = MagicMock()
+    summary_ws = MagicMock()
+    fake_sh = MagicMock()
+    fake_sh.worksheets.return_value = []
+
+    def _add_worksheet(title, rows=10, cols=10, index=None):
+        if title == gsheets.SUMMARY_TAB_TITLE:
+            return summary_ws
+        return group_ws
+
+    fake_sh.add_worksheet.side_effect = _add_worksheet
+
+    fake_gc = MagicMock()
+    fake_gc.open_by_key.return_value = fake_sh
+
+    monkeypatch.setattr(gsheets, '_gc', fake_gc)
+
+    db = _build_two_chat_db()
+
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(
+            gsheets.update_admin_spreadsheet(648981358, 'SID_INT', db)
+        )
+    finally:
+        loop.close()
+
+    assert result == 'SID_INT'
+    fake_gc.open_by_key.assert_called_once_with('SID_INT')
+
+    created_titles = [c.kwargs.get('title') or c.args[0]
+                      for c in fake_sh.add_worksheet.call_args_list]
+    assert 'Alpha' in created_titles
+    assert 'Beta' in created_titles
+    assert gsheets.SUMMARY_TAB_TITLE in created_titles
+
+    # Summary tab: header + 2 group rows.
+    summary_ws.clear.assert_called_once()
+    summary_rows = summary_ws.update.call_args.args[0]
+    assert summary_rows[0] == ['Группа', 'Всего сообщений', 'Всего юзеров', 'Всего реакций']
+    assert len(summary_rows) == 3
+    group_names = {r[0] for r in summary_rows[1:]}
+    assert group_names == {'Alpha', 'Beta'}
+
+    # Group tabs: header written for both.
+    assert group_ws.clear.call_count == 2
+    assert group_ws.update.call_count == 2
+    written_headers = [c.args[0][0] for c in group_ws.update.call_args_list]
+    for header in written_headers:
+        assert header[2] == 'Сообщений'
+
+
+def test_integrated_get_or_create_reuses_then_creates(monkeypatch):
+    """Reuse existing sid (update only); then create when absent."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(gsheets, '_gc', MagicMock())
+
+    update_calls = []
+    create_calls = []
+
+    async def fake_update(admin_user_id, spreadsheet_id, db):
+        update_calls.append(spreadsheet_id)
+        return spreadsheet_id
+
+    async def fake_create(admin_user_id, username, db):
+        create_calls.append((admin_user_id, username))
+        db['users'][str(admin_user_id)]['spreadsheet_id'] = 'CREATED_SID'
+        return 'CREATED_SID'
+
+    monkeypatch.setattr(gsheets, 'update_admin_spreadsheet', fake_update)
+    monkeypatch.setattr(gsheets, 'create_admin_spreadsheet', fake_create)
+
+    db = _build_two_chat_db()
+
+    # 1. Existing sid -> reuse.
+    db['users']['648981358']['spreadsheet_id'] = 'REUSE_SID'
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.get_or_create_admin_spreadsheet(648981358, db)
+        )
+    finally:
+        loop.close()
+    assert sid == 'REUSE_SID'
+    assert update_calls == ['REUSE_SID']
+    assert create_calls == []
+
+    # 2. No sid -> create.
+    update_calls.clear()
+    create_calls.clear()
+    del db['users']['648981358']['spreadsheet_id']
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.get_or_create_admin_spreadsheet(648981358, db)
+        )
+    finally:
+        loop.close()
+    assert sid == 'CREATED_SID'
+    assert create_calls == [(648981358, 'andrey')]
+    assert update_calls == ['CREATED_SID']
