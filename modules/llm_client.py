@@ -27,12 +27,31 @@ async def ask_llm(condition_text, channel_text_data):
 
     model_name = config['Settings'].get('text_model', 'deepseek/deepseek-v4-flash')
 
+    # Опциональные параметры из конфига: передаём только если заданы
+    create_kwargs = {
+        "model": model_name,
+        "messages": messages,
+        "stream": True,
+    }
+
+    max_tokens_raw = config['Settings'].get('max_tokens')
+    if max_tokens_raw is not None and str(max_tokens_raw).strip() != "":
+        try:
+            create_kwargs["max_tokens"] = int(max_tokens_raw)
+        except (TypeError, ValueError):
+            print(f"Некорректное значение max_tokens в конфиге: {max_tokens_raw!r}, пропускаю")
+
+    temperature_raw = config['Settings'].get('temperature')
+    if temperature_raw is not None and str(temperature_raw).strip() != "":
+        try:
+            create_kwargs["temperature"] = float(temperature_raw)
+        except (TypeError, ValueError):
+            print(f"Некорректное значение temperature в конфиге: {temperature_raw!r}, пропускаю")
+
     for attempt in range(3):
         try:
             response_stream = openai.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                stream=True,
+                **create_kwargs
             )
 
             # В тестах `response_stream` – список мока, а не генератор. Поддержим оба варианта
