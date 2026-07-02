@@ -155,6 +155,147 @@ def test_sanitize_sheet_title_no_forbidden_chars():
     assert gsheets.sanitize_sheet_title('Общая статистика') == 'Общая статистика'
 
 
+def test_update_admin_spreadsheet_none_when_no_client(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(gsheets, '_gc', None)
+
+    db = {'chats': {}, 'users': {}}
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(
+            gsheets.update_admin_spreadsheet(1, 'SID', db)
+        )
+    finally:
+        loop.close()
+
+    assert result is None
+
+
+def test_update_admin_spreadsheet_creates_tabs_and_summary(monkeypatch):
+    import asyncio
+    from unittest.mock import MagicMock
+
+    group_ws = MagicMock()
+    summary_ws = MagicMock()
+
+    fake_sh = MagicMock()
+    fake_sh.worksheets.return_value = []  # no existing tabs
+
+    # Distinct worksheet mock per add_worksheet call (group, then summary).
+    def _add_worksheet(title, rows=10, cols=10, index=None):
+        if title == gsheets.SUMMARY_TAB_TITLE:
+            return summary_ws
+        return group_ws
+
+    fake_sh.add_worksheet.side_effect = _add_worksheet
+
+    fake_gc = MagicMock()
+    fake_gc.open_by_key.return_value = fake_sh
+
+    monkeypatch.setattr(gsheets, '_gc', fake_gc)
+
+    chat_data = _build_chat_data()
+    db = {
+        'superadmins': ['648981358'],
+        'chats': {
+            '-100123': {
+                'title': 'Group A',
+                'admins': [],
+                **chat_data,
+            },
+        },
+        'users': {
+            '100': {'username': 'alice'},
+            '200': {'username': 'bob'},
+        },
+    }
+
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(
+            gsheets.update_admin_spreadsheet(648981358, 'SID_X', db)
+        )
+    finally:
+        loop.close()
+
+    assert result == 'SID_X'
+    fake_gc.open_by_key.assert_called_once_with('SID_X')
+
+    # Should create one group tab and one summary tab.
+    assert fake_sh.add_worksheet.call_count == 2
+    created_titles = [c.kwargs.get('title') or c.args[0]
+                      for c in fake_sh.add_worksheet.call_args_list]
+    assert 'Group A' in created_titles
+    assert gsheets.SUMMARY_TAB_TITLE in created_titles
+
+    # No stray tabs to delete (worksheets was empty).
+    assert fake_sh.del_worksheet.call_count == 0
+
+    summary_ws.clear.assert_called_once()
+    summary_rows = summary_ws.update.call_args.args[0]
+    assert summary_rows[0] == ['Группа', 'Всего сообщений', 'Всего юзеров', 'Всего реакций']
+    assert len(summary_rows) == 2
+    row = summary_rows[1]
+    assert row[0] == 'Group A'
+    assert row[1] == 3  # 3 messages in _build_chat_data
+    assert row[2] == 2  # 2 users
+    # 3 reactions given total (delta 1 from bob + delta 2 from alice).
+    assert row[3] == 3
+
+    # Group tab also written.
+    group_ws.clear.assert_called_once()
+    group_rows_written = group_ws.update.call_args.args[0]
+    assert group_rows_written[0][2] == 'Сообщений'
+
+
+def test_update_admin_spreadsheet_deletes_stray_tabs(monkeypatch):
+    import asyncio
+    from unittest.mock import MagicMock
+
+    stray = MagicMock()
+    stray.title = 'Old Group'
+    keep_group = MagicMock()
+    keep_group.title = 'Group A'
+    keep_summary = MagicMock()
+    keep_summary.title = gsheets.SUMMARY_TAB_TITLE
+
+    fake_sh = MagicMock()
+    fake_sh.worksheets.return_value = [stray, keep_group, keep_summary]
+
+    fake_gc = MagicMock()
+    fake_gc.open_by_key.return_value = fake_sh
+
+    monkeypatch.setattr(gsheets, '_gc', fake_gc)
+
+    db = {
+        'superadmins': ['648981358'],
+        'chats': {
+            '-100123': {'title': 'Group A', 'admins': [],
+                        'history': {}, 'reactions': {}},
+        },
+        'users': {},
+    }
+
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(
+            gsheets.update_admin_spreadsheet(648981358, 'SID_X', db)
+        )
+    finally:
+        loop.close()
+
+    assert result == 'SID_X'
+    # Only the stray tab should be deleted; the kept tabs stay.
+    fake_sh.del_worksheet.assert_called_once_with(stray)
+    # Existing tabs should be cleared+rewritten, not re-created.
+    fake_sh.add_worksheet.assert_not_called()
+    keep_group.clear.assert_called_once()
+    keep_summary.clear.assert_called_once()
+    assert keep_group.update.called
+    assert keep_summary.update.called
+
+
 def test_create_admin_spreadsheet_returns_id_and_persists(monkeypatch):
     import asyncio
     from unittest.mock import MagicMock

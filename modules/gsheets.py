@@ -322,6 +322,70 @@ def _write_group_tab(sh, tab_title, chat_data, db):
     ws.update(rows)
 
 
+async def update_admin_spreadsheet(admin_user_id, spreadsheet_id, db):
+    """Refresh an admin's spreadsheet in place (idempotent, ~30-min safe).
+
+    Opens the spreadsheet by key, reconciles the set of tabs with the admin's
+    current groups (deleting tabs for groups the admin no longer manages, per
+    the idempotent-update policy in RESEARCH.md), rewrites each group tab with
+    fresh per-user stats via ``_write_group_tab``, and finally rewrites the
+    ``Общая статистика`` summary tab via ``_write_summary_tab``.
+
+    All blocking gspread calls are wrapped in ``asyncio.to_thread`` so the bot
+    event loop is not blocked.
+
+    Args:
+        admin_user_id: Telegram user id (int or str) of the admin.
+        spreadsheet_id: the spreadsheet id (str) previously returned by
+            ``create_admin_spreadsheet``.
+        db: the in-memory database dict (same shape as ``load_database()``).
+
+    Returns:
+        The ``spreadsheet_id`` on success, or ``None`` when the gspread client
+        is unavailable (missing credentials / gspread not installed).
+    """
+    gc = _get_client()
+    if gc is None:
+        return None
+
+    sh = await asyncio.to_thread(gc.open_by_key, spreadsheet_id)
+
+    groups = get_admin_groups(admin_user_id, db)
+    desired = {sanitize_sheet_title(t) for t in groups.values()} | {SUMMARY_TAB_TITLE}
+
+    # Delete tabs for groups the admin no longer manages. ``worksheets()``
+    # returns a fresh list snapshot, so iterating while deleting is safe.
+    for ws in sh.worksheets():
+        if ws.title not in desired:
+            sh.del_worksheet(ws)
+
+    group_rows = []
+    chats = db.get('chats', {})
+    for cid, title in groups.items():
+        tab = sanitize_sheet_title(title)
+        chat_data = chats.get(cid, {})
+        await asyncio.to_thread(_write_group_tab, sh, tab, chat_data, db)
+
+        # Aggregate group-level totals for the summary tab. ``compute_user_stats``
+        # is pure/in-memory so it's safe to run on the event loop thread; it is
+        # also invoked inside ``_write_group_tab``, but we recompute here rather
+        # than changing ``_write_group_tab``'s signature (which existing tests
+        # pin).
+        stats = compute_user_stats(chat_data, [], db)
+        total_msgs = sum(s['messages'] for s in stats.values())
+        total_users = len(stats)
+        total_rxns = sum(s['reactions_given'] for s in stats.values())
+        group_rows.append([title, total_msgs, total_users, total_rxns])
+
+    await asyncio.to_thread(_write_summary_tab, sh, group_rows)
+
+    logging.info(
+        "Sheets sync: admin=%s spreadsheet=%s updated (%d groups)",
+        admin_user_id, spreadsheet_id, len(group_rows),
+    )
+    return spreadsheet_id
+
+
 async def create_admin_spreadsheet(admin_user_id, admin_username, db):
     """Create a per-admin Google Spreadsheet and persist its id in the DB.
 
