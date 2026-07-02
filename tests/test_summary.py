@@ -221,3 +221,122 @@ def test_topic_prompt_per_chat_override():
 
     cond = captured[0]["condition_text"]
     assert "МОЙ_КАСТОМНЫЙ_ПРОМПТ_123" in cond
+
+
+# ---------------------------------------------------------------------------
+# Тесты форматирования forming_data в читаемую строку для LLM.
+# forming_data (list[dict]) должен передаваться в ask_llm как строка формата
+# '[1] username: text (link)\n[2] ...', а не как str(list[dict]).
+# ---------------------------------------------------------------------------
+
+def _make_fake_ask_llm_capturing_both(captured_list):
+    """Записывает в captured_list оба аргумента ask_llm:
+    condition_text (промпт) и channel_text_data (отформатированные сообщения).
+    """
+    async def fake_ask_llm(condition_text, channel_text_data):
+        captured_list.append({
+            "condition_text": condition_text,
+            "channel_text_data": channel_text_data,
+        })
+        return '{"🔥 | Юмор": [1, "https://t.me/c/1/1"]}'
+    return fake_ask_llm
+
+
+def _two_messages_db():
+    """db с одним чатом и двумя сообщениями от разных юзеров."""
+    date = "2023-05-18"
+    messages = [
+        {"user_id": "111", "link_to_message": "https://t.me/c/1/10",
+         "timestamp": "2023-05-18 10:00:00", "text_in_msg": "Привет всем"},
+        {"user_id": "222", "link_to_message": "https://t.me/c/1/11",
+         "timestamp": "2023-05-18 11:00:00", "text_in_msg": "Как дела?"},
+    ]
+    db = _make_db_with_chat("-100123", date, messages)
+    db["users"]["111"] = {"username": "alice", "first_seen": ""}
+    db["users"]["222"] = {"username": "bob", "first_seen": ""}
+    return db, date
+
+
+def test_forming_data_is_formatted_string_not_str_of_list_dict():
+    """channel_text_data — строка '[1] username: text (link)\\n...', не str(list[dict])."""
+    captured = []
+    db, date = _two_messages_db()
+
+    with patch("modules.summary.ask_llm", new=AsyncMock(side_effect=_make_fake_ask_llm_capturing_both(captured))):
+        _run_async(get_summary_data("-100123", date, db))
+
+    assert len(captured) >= 1, "ask_llm не был вызван"
+    data = captured[0]["channel_text_data"]
+    assert isinstance(data, str), f"Ожидалась str, получено {type(data).__name__}"
+    # Сырые dict-представления отсутствуют
+    assert "{" not in data, f"В выводе есть сырой dict-представление '{{': {data!r}"
+    assert "'" not in data, f"В выводе есть одинарные кавычки (признак str(list)): {data!r}"
+
+
+def test_forming_data_contains_indexed_username_text_link():
+    """Формат строки содержит '[1] alice: Привет всем (link)\\n[2] bob: ...'."""
+    captured = []
+    db, date = _two_messages_db()
+
+    with patch("modules.summary.ask_llm", new=AsyncMock(side_effect=_make_fake_ask_llm_capturing_both(captured))):
+        _run_async(get_summary_data("-100123", date, db))
+
+    data = captured[0]["channel_text_data"]
+    assert "[1] alice: Привет всем (https://t.me/c/1/10)" in data
+    assert "[2] bob: Как дела? (https://t.me/c/1/11)" in data
+
+
+def test_forming_data_no_user_id_no_timestamp():
+    """В отформатированной строке нет user_id и timestamp."""
+    captured = []
+    db, date = _two_messages_db()
+
+    with patch("modules.summary.ask_llm", new=AsyncMock(side_effect=_make_fake_ask_llm_capturing_both(captured))):
+        _run_async(get_summary_data("-100123", date, db))
+
+    data = captured[0]["channel_text_data"]
+    assert "user_id" not in data, f"В выводе есть 'user_id': {data!r}"
+    assert "timestamp" not in data, f"В выводе есть 'timestamp': {data!r}"
+    # Сырые значения id/времени тоже не должны просачиваться как ключи dict
+    assert "111" not in data or "alice" in data  # 111 может быть частью ссылки, но не как user_id
+    assert "2023-05-18 10:00:00" not in data
+
+
+def test_forming_data_username_fallback_unknown():
+    """Если user_id отсутствует в database['users'] — fallback на 'Unknown'."""
+    captured = []
+    date = "2023-05-18"
+    messages = [
+        {"user_id": "999", "link_to_message": "https://t.me/c/1/1",
+         "timestamp": "2023-05-18 10:00:00", "text_in_msg": "Одинокий текст"}
+    ]
+    db = _make_db_with_chat("-100123", date, messages)
+    # намеренно удаляем auto-созданного юзера, чтобы проверить fallback на 'Unknown'
+    db["users"].pop("999", None)
+
+    with patch("modules.summary.ask_llm", new=AsyncMock(side_effect=_make_fake_ask_llm_capturing_both(captured))):
+        _run_async(get_summary_data("-100123", date, db))
+
+    data = captured[0]["channel_text_data"]
+    assert "[1] Unknown: Одинокий текст (https://t.me/c/1/1)" in data
+    assert "{" not in data
+
+
+if __name__ == "__main__":
+    test_parse_valid_json_string()
+    test_parse_json_in_markdown_fence()
+    test_parse_json_in_python_fence()
+    test_parse_dict_inside_text()
+    test_parse_invalid_returns_none()
+    test_parse_non_dict_json_returns_none()
+    test_parse_plain_fence_no_lang()
+    test_topic_prompt_does_not_contain_kazhduyu()
+    test_topic_prompt_contains_clustering_instruction()
+    test_topic_prompt_respects_summary_topic_limit_setting()
+    test_topic_prompt_has_prochee_fallback_instruction()
+    test_topic_prompt_per_chat_override()
+    test_forming_data_is_formatted_string_not_str_of_list_dict()
+    test_forming_data_contains_indexed_username_text_link()
+    test_forming_data_no_user_id_no_timestamp()
+    test_forming_data_username_fallback_unknown()
+    print("\nAll summary tests PASSED")
