@@ -85,8 +85,8 @@ def test_default_prompt_has_new_instructions(monkeypatch):
     assert 'Объединяй похожие сообщения' in cond
     # Инструкция про Прочее
     assert 'Прочее' in cond
-    # Лимит адаптивный: при 1 сообщении — от 1 до 3
-    assert 'от 1 до 3 ключевых тем' in cond
+    # Лимит: все значимые темы, не больше 10
+    assert 'не больше 10' in cond
     # Явный пример вывода (dict тем)
     assert 'Пример ожидаемого вывода' in cond
     assert '"🔥 | Юмор и мемы"' in cond
@@ -100,8 +100,8 @@ def test_topic_limit_override(monkeypatch):
     _run(s.get_summary_data(-100123, '2026-01-01', db))
 
     cond = captured['topics']
-    # 1 сообщение, topic_limit=5 → адаптивный: от 1 до min(3,5)=3
-    assert 'от 1 до 3 ключевых тем' in cond
+    # 1 сообщение, topic_limit=5 → "не больше 5"
+    assert 'не больше 5' in cond
 
 
 def test_prompt_summary_override_replaces_default(monkeypatch):
@@ -118,5 +118,5 @@ def test_prompt_summary_override_replaces_default(monkeypatch):
     # Дефолтные инструкции отсутствуют (override заменяет целиком)
     assert 'Группируй сообщения по темам' not in cond
     assert 'Пример ожидаемого вывода' not in cond
-    # Но лимит из condition_main всё равно применяется (адаптивный при 1 сообщении)
-    assert 'от 1 до 3 ключевых тем' in cond
+    # Но лимит из condition_main всё равно применяется (по умолчанию 10)
+    assert 'не больше 10' in cond

@@ -100,20 +100,10 @@ async def get_summary_data(chat_id, data_needed, database):
     # Настройки промптов берем из настроек чата (или дефолтные)
     settings = database['chats'][chat_id_str].get('settings', {})
     
-    # Лимит тем за день: адаптивный, зависит от количества сообщений
-    topic_limit = settings.get('summary_topic_limit', 8)
-    msg_count = len(messages)
-    if msg_count <= 10:
-        topic_min = 1
-        topic_max = min(3, topic_limit)
-    elif msg_count <= 30:
-        topic_min = 1
-        topic_max = min(5, topic_limit)
-    else:
-        topic_min = 3
-        topic_max = topic_limit
+    # Лимит тем за день: без нижней границы, максимум topic_limit (по умолчанию 10)
+    topic_limit = settings.get('summary_topic_limit', 10)
 
-    condition_main = f'Твоя задача обработать текст из истории чата по условиям:\n- Выдели от {topic_min} до {topic_max} ключевых тем за день.\n- НЕ дроби близкие темы. Если сообщения обсуждают одно и то же — это ОДНА тема, а не несколько.\n- Количество тем должно быть оправдано содержанием, а не стремлением набрать минимум.\n'
+    condition_main = f'Твоя задача обработать текст из истории чата по условиям:\n- Выдели все значимые темы за день, но не больше {topic_limit}.\n- НЕ дроби близкие темы. Если сообщения обсуждают одно и то же — это ОДНА тема, а не несколько.\n- Количество тем должно быть оправдано содержанием, а не стремлением набрать максимум.\n- Мелкие упоминания объедини с ближайшей по смыслу темой или отнеси к "Прочее".\n'
     condition_main2 = '''\nВОТ СТРОГИЙ ФОРМАТ ДАННЫХ:
     {"(Here insert an emoticon on the topic) | Юмор, обсуждали последние мемы": [ЧИСЛО СОВПАДЕНИЙ по теме, "(link_to_message)"],
      "(Here insert an emoticon on the topic) | Разговор о политике": [ЧИСЛО СОВПАДЕНИЙ по теме, "(link_to_message)"]}
