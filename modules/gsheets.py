@@ -199,6 +199,26 @@ def compute_user_stats(chat_data: dict, args: list = None, db: dict = None) -> d
     return user_stats
 
 
+# Characters forbidden in Google Sheets tab names. Google rejects ':' outright
+# and the others (per RESEARCH.md) are reserved/unsafe in the Sheets UI.
+_FORBIDDEN_CHARS = (':', '/', '\\', '?', '*', '[', ']')
+
+
+def sanitize_sheet_title(title: str) -> str:
+    """Sanitize a group title for use as a Google Sheets tab name.
+
+    Replaces every forbidden character (``:`` ``/`` ``\\`` ``?`` ``*`` ``[`` ``]``)
+    with a space, truncates the result to the 100-character limit imposed by the
+    Sheets API, and strips leading/trailing whitespace.
+
+    Pure function — no side effects, no I/O. Callers are responsible for
+    de-duplicating the returned title within a spreadsheet.
+    """
+    for ch in _FORBIDDEN_CHARS:
+        title = title.replace(ch, ' ')
+    return title[:100].strip()
+
+
 SUMMARY_TAB_TITLE = 'Общая статистика'
 
 

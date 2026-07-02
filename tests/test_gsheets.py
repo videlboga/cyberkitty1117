@@ -121,3 +121,35 @@ def test_get_client_returns_none_on_service_account_error(monkeypatch, tmp_path)
     gsheets._gc = None
     assert gsheets._get_client() is None
     gsheets._gc = None
+
+
+def test_sanitize_sheet_title_replaces_forbidden_chars():
+    raw = 'a:b/c\\d?e*f[g]h'
+    assert gsheets.sanitize_sheet_title(raw) == 'a b c d e f g h'
+
+
+def test_sanitize_sheet_title_strips_whitespace():
+    assert gsheets.sanitize_sheet_title('  hello  ') == 'hello'
+    # Leading/trailing forbidden chars become spaces then are stripped.
+    assert gsheets.sanitize_sheet_title(':::title:::') == 'title'
+
+
+def test_sanitize_sheet_title_truncates_to_100():
+    raw = 'x' * 150
+    result = gsheets.sanitize_sheet_title(raw)
+    assert len(result) == 100
+    assert result == 'x' * 100
+
+
+def test_sanitize_sheet_title_truncates_after_replacement():
+    # 100 'a' plus a trailing ':' — replacement yields 101 chars, truncate to 100.
+    raw = 'a' * 100 + ':'
+    assert gsheets.sanitize_sheet_title(raw) == 'a' * 100
+
+
+def test_sanitize_sheet_title_empty_after_strip():
+    assert gsheets.sanitize_sheet_title('///') == ''
+
+
+def test_sanitize_sheet_title_no_forbidden_chars():
+    assert gsheets.sanitize_sheet_title('Общая статистика') == 'Общая статистика'
