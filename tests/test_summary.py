@@ -183,7 +183,8 @@ def test_topic_prompt_respects_summary_topic_limit_setting():
         _run_async(get_summary_data("-100123", date, db))
 
     cond = captured[0]["condition_text"]
-    assert "3 до 5" in cond, f"Лимит тем не подставился из settings: {cond!r}"
+    # 1 сообщение, topic_limit=5 → адаптивный: от 1 до min(3,5)=3
+    assert "1 до 3" in cond, f"Лимит тем не подставился из settings: {cond!r}"
 
 
 def test_topic_prompt_has_prochee_fallback_instruction():
