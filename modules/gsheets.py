@@ -197,3 +197,38 @@ def compute_user_stats(chat_data: dict, args: list = None, db: dict = None) -> d
                     user_stats[author]['reactions_received'] += delta
 
     return user_stats
+
+
+SUMMARY_TAB_TITLE = 'Общая статистика'
+
+
+def _write_summary_tab(sh, group_rows: list):
+    """Write the ``Общая статистика`` summary tab into spreadsheet ``sh``.
+
+    Finds an existing ``Общая статистика`` worksheet (clearing it in place,
+    per the idempotent-update policy in RESEARCH.md) or creates it as the
+    first sheet, then writes the header row followed by one row per group.
+
+    Purely synchronous — meant to run inside ``asyncio.to_thread`` by the
+    async public callers.
+
+    Args:
+        sh: an open gspread ``Spreadsheet``.
+        group_rows: list of row lists shaped
+            ``[[group_title, total_messages, total_users, total_reactions], ...]``.
+    """
+    summary_ws = None
+    for ws in sh.worksheets():
+        if ws.title == SUMMARY_TAB_TITLE:
+            summary_ws = ws
+            break
+
+    if summary_ws is None:
+        summary_ws = sh.add_worksheet(
+            SUMMARY_TAB_TITLE, rows=100, cols=4, index=0
+        )
+
+    summary_ws.clear()
+
+    header = ['Группа', 'Всего сообщений', 'Всего юзеров', 'Всего реакций']
+    summary_ws.update([header] + list(group_rows))
