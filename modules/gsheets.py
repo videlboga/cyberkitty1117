@@ -425,3 +425,40 @@ async def create_admin_spreadsheet(admin_user_id, admin_username, db):
 
     logging.info("Sheets: created spreadsheet %s for admin %s (%s)", sid, admin_user_id, admin_username)
     return sid
+
+
+async def get_or_create_admin_spreadsheet(admin_user_id, db):
+    """Return a usable spreadsheet id for ``admin_user_id``, creating if needed.
+
+    If the admin's record in ``db['users'][str(admin_user_id)]`` already has a
+    truthy ``spreadsheet_id``, the existing spreadsheet is refreshed in place
+    via ``update_admin_spreadsheet`` and its id returned. Otherwise a new
+    spreadsheet is created with ``create_admin_spreadsheet`` (using the admin's
+    stored username, falling back to ``ID:{uid}`` when no username is set), and
+    — only when creation succeeds — immediately updated via
+    ``update_admin_spreadsheet`` so the caller always gets a populated sheet.
+
+    Per RESEARCH.md acceptance criterion 4. Returns the spreadsheet id (str)
+    on success, or ``None`` when the gspread client is unavailable or creation
+    fails (``create_admin_spreadsheet`` returned ``None``).
+
+    Args:
+        admin_user_id: Telegram user id (int or str) of the admin.
+        db: the in-memory database dict (same shape as ``load_database()``).
+
+    Returns:
+        The spreadsheet id (str), or ``None``.
+    """
+    uid = str(admin_user_id)
+    user_record = db.get('users', {}).get(uid, {})
+    sid = user_record.get('spreadsheet_id')
+
+    if sid:
+        await update_admin_spreadsheet(admin_user_id, sid, db)
+        return sid
+
+    username = user_record.get('username', f'ID:{uid}')
+    sid = await create_admin_spreadsheet(admin_user_id, username, db)
+    if sid:
+        await update_admin_spreadsheet(admin_user_id, sid, db)
+    return sid

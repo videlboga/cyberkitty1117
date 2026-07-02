@@ -533,3 +533,143 @@ def test_write_group_tab_empty_chat():
     # Only the header row, no data rows.
     assert len(rows) == 1
     assert rows[0][2] == 'Сообщений'
+
+
+def test_get_or_create_admin_spreadsheet_reuses_existing_id(monkeypatch):
+    """When the admin already has a spreadsheet_id, reuse it (call update only)."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(gsheets, '_gc', MagicMock())
+
+    update_calls = []
+    create_calls = []
+
+    async def fake_update(admin_user_id, spreadsheet_id, db):
+        update_calls.append((admin_user_id, spreadsheet_id))
+        return spreadsheet_id
+
+    async def fake_create(admin_user_id, username, db):
+        create_calls.append((admin_user_id, username))
+        return 'NEW_SID'
+
+    monkeypatch.setattr(gsheets, 'update_admin_spreadsheet', fake_update)
+    monkeypatch.setattr(gsheets, 'create_admin_spreadsheet', fake_create)
+
+    db = {'users': {'42': {'username': 'neo', 'spreadsheet_id': 'EXISTING_SID'}}}
+
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.get_or_create_admin_spreadsheet(42, db)
+        )
+    finally:
+        loop.close()
+
+    assert sid == 'EXISTING_SID'
+    assert update_calls == [(42, 'EXISTING_SID')]
+    assert create_calls == []  # must not create when an id exists
+
+
+def test_get_or_create_admin_spreadsheet_creates_when_absent(monkeypatch):
+    """When no spreadsheet_id is stored, create then update, return the new id."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(gsheets, '_gc', MagicMock())
+
+    update_calls = []
+    create_calls = []
+
+    async def fake_update(admin_user_id, spreadsheet_id, db):
+        update_calls.append((admin_user_id, spreadsheet_id))
+        return spreadsheet_id
+
+    async def fake_create(admin_user_id, username, db):
+        create_calls.append((admin_user_id, username))
+        db['users'][str(admin_user_id)]['spreadsheet_id'] = 'NEW_SID'
+        return 'NEW_SID'
+
+    monkeypatch.setattr(gsheets, 'update_admin_spreadsheet', fake_update)
+    monkeypatch.setattr(gsheets, 'create_admin_spreadsheet', fake_create)
+
+    db = {'users': {'42': {'username': 'neo'}}}
+
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.get_or_create_admin_spreadsheet(42, db)
+        )
+    finally:
+        loop.close()
+
+    assert sid == 'NEW_SID'
+    assert create_calls == [(42, 'neo')]
+    assert update_calls == [(42, 'NEW_SID')]
+
+
+def test_get_or_create_admin_spreadsheet_username_fallback(monkeypatch):
+    """When the user record has no username, pass ID:{uid} to create."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(gsheets, '_gc', MagicMock())
+
+    create_calls = []
+
+    async def fake_update(admin_user_id, spreadsheet_id, db):
+        return spreadsheet_id
+
+    async def fake_create(admin_user_id, username, db):
+        create_calls.append((admin_user_id, username))
+        return 'NEW_SID'
+
+    monkeypatch.setattr(gsheets, 'update_admin_spreadsheet', fake_update)
+    monkeypatch.setattr(gsheets, 'create_admin_spreadsheet', fake_create)
+
+    # No 'users' key at all → username falls back to 'ID:42'.
+    db = {}
+
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.get_or_create_admin_spreadsheet(42, db)
+        )
+    finally:
+        loop.close()
+
+    assert sid == 'NEW_SID'
+    assert create_calls == [(42, 'ID:42')]
+
+
+def test_get_or_create_admin_spreadsheet_none_when_create_fails(monkeypatch):
+    """When create returns None (no client), skip update and return None."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(gsheets, '_gc', None)
+
+    update_calls = []
+
+    async def fake_update(admin_user_id, spreadsheet_id, db):
+        update_calls.append(spreadsheet_id)
+        return spreadsheet_id
+
+    async def fake_create(admin_user_id, username, db):
+        return None  # simulates _get_client() returning None
+
+    monkeypatch.setattr(gsheets, 'update_admin_spreadsheet', fake_update)
+    monkeypatch.setattr(gsheets, 'create_admin_spreadsheet', fake_create)
+
+    db = {'users': {}}
+
+    loop = asyncio.new_event_loop()
+    try:
+        sid = loop.run_until_complete(
+            gsheets.get_or_create_admin_spreadsheet(1, db)
+        )
+    finally:
+        loop.close()
+
+    assert sid is None
+    assert update_calls == []  # update must not run when create failed
