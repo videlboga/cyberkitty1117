@@ -24,15 +24,19 @@ from modules.export import process_export, build_global_export_csv_bytes
 from modules.roles import is_superadmin, is_admin, get_admin_groups, ADMIN_ID
 
 try:
-    from modules.gsheets import get_or_create_admin_spreadsheet, update_admin_spreadsheet
+    from modules.gsheets import update_admin_spreadsheet
     _SHEETS_SYNC_AVAILABLE = True
 except ImportError as e:
-    get_or_create_admin_spreadsheet = None
     update_admin_spreadsheet = None
     _SHEETS_SYNC_AVAILABLE = False
     logging.warning(f"Sheets sync выключен (gsheets import failed): {e}")
 
 PAGE_SIZE = 5
+
+# Единая целевая таблица Google Sheets: пишем только для одного админа
+# (вместо перебора всех админов). ID таблицы извлечён из URL sharing-ссылки.
+SHEETS_TARGET_ADMIN_ID = '1736016311'
+SHEETS_TARGET_SPREADSHEET_ID = '1P_7r0zO7O-FNrm1Dy3PG919yZ459MbHF5zcw7ezHkQM'
 
 # Блокировки на уровне чата — предотвращают параллельный вызов LLM
 # для одного chat_id (корень race condition в daily_summary_job)
@@ -621,36 +625,38 @@ async def daily_summary_job(bot: Bot):
 
 
 async def sheets_sync_job(bot: Bot):
-    """Фоновый воркер синхронизации админских таблиц Google Sheets.
+    """Фоновый воркер синхронизации таблицы Google Sheets.
 
     Запускается отложенно (через 15 с после старта бота), затем каждые 30 мин
-    обходит всех админов (объединение superadmins и chats[*].admins),
-    вызывает get_or_create_admin_spreadsheet для каждого. Ошибки по одному
-    админу логируются и не роняют воркер; исключение во внешнем цикле тоже
-    логируется, после чего воркер засыпает до следующей итерации.
+    обновляет одну целевую таблицу (SHEETS_TARGET_SPREADSHEET_ID) для админа
+    SHEETS_TARGET_ADMIN_ID. Ошибки логируются и не роняют воркер.
     """
     await asyncio.sleep(15)
     if not _SHEETS_SYNC_AVAILABLE:
         logging.info("Sheets sync воркер остановлен: модуль gsheets недоступен.")
         return
-    logging.info("Sheets sync воркер запущен.")
+    logging.info("Sheets sync воркер запущен (target admin=%s).", SHEETS_TARGET_ADMIN_ID)
     while True:
         try:
             db = load_database()
-            all_admins = set(db.get('superadmins', [])) | {
-                a for c in db.get('chats', {}).values() for a in c.get('admins', [])
-            }
-            for aid in all_admins:
-                if not aid:
-                    continue
-                try:
-                    sid = await get_or_create_admin_spreadsheet(aid, db)
-                    if sid is None:
-                        logging.warning(f'Sheets sync: admin={aid} пропущен (нет клиента/учётных данных)')
-                    else:
-                        logging.info(f'Sheets sync: admin={aid} ok')
-                except Exception as e:
-                    logging.error(f'Sheets sync failed for {aid}: {e}', exc_info=True)
+            try:
+                sid = await update_admin_spreadsheet(
+                    SHEETS_TARGET_ADMIN_ID,
+                    SHEETS_TARGET_SPREADSHEET_ID,
+                    db,
+                )
+                if sid is None:
+                    logging.warning(
+                        'Sheets sync: admin=%s пропущен (нет клиента/учётных данных)',
+                        SHEETS_TARGET_ADMIN_ID,
+                    )
+                else:
+                    logging.info('Sheets sync: admin=%s ok', SHEETS_TARGET_ADMIN_ID)
+            except Exception as e:
+                logging.error(
+                    f'Sheets sync failed for {SHEETS_TARGET_ADMIN_ID}: {e}',
+                    exc_info=True,
+                )
         except Exception as e:
             logging.error(f'Sheets sync outer error: {e}', exc_info=True)
         await asyncio.sleep(1800)
