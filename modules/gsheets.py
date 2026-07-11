@@ -355,9 +355,14 @@ async def update_admin_spreadsheet(admin_user_id, spreadsheet_id, db):
 
     # Delete tabs for groups the admin no longer manages. ``worksheets()``
     # returns a fresh list snapshot, so iterating while deleting is safe.
-    for ws in sh.worksheets():
-        if ws.title not in desired:
+    # Google Sheets forbids removing ALL sheets from a document, so we
+    # skip deletion when only one non-desired sheet remains — it will be
+    # removed later once a desired tab has been created.
+    current_sheets = sh.worksheets()
+    for ws in current_sheets:
+        if ws.title not in desired and len(current_sheets) > 1:
             sh.del_worksheet(ws)
+            current_sheets = [w for w in current_sheets if w.id != ws.id]
 
     group_rows = []
     chats = db.get('chats', {})
