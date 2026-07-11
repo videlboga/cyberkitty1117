@@ -33,3 +33,4 @@ run.log
 # OS Files
 .DS_Store
 Thumbs.db
+*.pyc
