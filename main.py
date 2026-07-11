@@ -662,6 +662,34 @@ async def sheets_sync_job(bot: Bot):
         await asyncio.sleep(1800)
 
 
+async def admin_sync_job(bot: Bot):
+    """Фоновый воркер синхронизации списка админов для всех чатов.
+
+    Спит 30 с после старта, затем в бесконечном цикле перебирает все чаты из
+    db['chats'], обновляет chat_data['admins'] и chat_data['admins_updated_at']
+    через bot.get_chat_administrators(int(cid)), сохраняет БД через save_database(db).
+    Ошибки для отдельных чатов логируются и не роняют воркер. Между циклами — sleep(3600).
+    """
+    await asyncio.sleep(30)
+    logging.info("admin_sync воркер запущен.")
+    while True:
+        try:
+            db = load_database()
+            chats = db.get('chats', {})
+            for cid, chat_data in chats.items():
+                try:
+                    admins = await bot.get_chat_administrators(int(cid))
+                    chat_data['admins'] = [str(a.user.id) for a in admins if not a.user.is_bot]
+                    chat_data['admins_updated_at'] = dt.now().timestamp()
+                except Exception as e:
+                    logging.error(f"admin_sync: chat {cid} failed: {e}")
+            await save_database(db)
+            logging.info("admin_sync: цикл завершён, БД сохранена.")
+        except Exception as e:
+            logging.error(f"admin_sync outer error: {e}", exc_info=True)
+        await asyncio.sleep(3600)
+
+
 async def main():
     # Use local Bot API server to avoid TelegramConflictError
     # (proxy server runs telegram-bot-api on port 8081)
@@ -677,6 +705,7 @@ async def main():
     logging.info("Бот переведен на управление через ЛС.")
     asyncio.create_task(daily_summary_job(bot))
     asyncio.create_task(sheets_sync_job(bot))
+    asyncio.create_task(admin_sync_job(bot))
     
     # Polling limits can be added via allowed_updates.
     # To receive reactions updates, we must enable message_reaction in allowed_updates.
