@@ -255,22 +255,27 @@ def _write_summary_tab(sh, group_rows: list):
 
 
 def _write_group_tab(sh, tab_title, chat_data, db):
-    """Write a per-group statistics tab into spreadsheet ``sh``.
+    """Write a per-group tab into spreadsheet ``sh`` with full event history.
 
     Finds an existing worksheet named ``tab_title`` (clearing it in place for
     idempotent updates, per RESEARCH.md) or creates it via ``sh.add_worksheet``
     (after scanning ``sh.worksheets()`` to avoid creating a duplicate tab),
-    then writes the header row followed by one row per user.
+    then writes three blocks mirroring ``modules/export.py::process_export``:
 
-    Per-user rows are produced by ``compute_user_stats(chat_data, [], db)``
-    (the all-time branch) and sorted by message count descending. The row
-    shape is ``[Дата, Пользователь, Сообщений, Реакций поставлено,
-    Реакций получено, Текст последнего сообщения]``.
+    Block 1 — Статистика пользователей (aggregate, one row per user):
+        ``['Чат', 'Пользователь', 'Сообщений', 'Реакций поставлено',
+        'Реакций получено']``, sorted by message count descending.
 
-    NOTE: ``compute_user_stats`` does not currently track a per-user date, so
-    the ``Дата`` column is written as an empty string. The column is kept in
-    the header (per the task spec) for a coherent sheet layout; filling it
-    requires extending ``compute_user_stats`` in a follow-up.
+    Block 2 — Все сообщения (one row per message, with date/time):
+        ``['Пользователь', 'Дата и время', 'Текст сообщения',
+        'Ссылка на сообщение']``, sorted by timestamp.
+
+    Block 3 — История подписок/отписок (one row per membership event):
+        ``['Пользователь', 'Отписка/Подписка', 'Дата']``, sorted by date.
+
+    Each block is preceded by a title row (e.g. ``['СПИСОК СООБЩЕНИЙ']``)
+    and blocks are separated by two empty rows, matching the CSV export
+    layout.
 
     Purely synchronous — meant to run inside ``asyncio.to_thread`` by the async
     public caller (``update_admin_spreadsheet``). Does not call
@@ -280,7 +285,8 @@ def _write_group_tab(sh, tab_title, chat_data, db):
         sh: an open gspread ``Spreadsheet``.
         tab_title: sanitized, unique tab title for this group.
         chat_data: ``db['chats'][cid]`` dict with ``history`` and
-            ``reactions`` sub-dicts keyed by date.
+            ``reactions`` sub-dicts keyed by date, plus optional
+            ``membership_events`` list.
         db: the in-memory database dict (used for username resolution via
             ``db['users'][uid]['username']``).
     """
@@ -295,29 +301,55 @@ def _write_group_tab(sh, tab_title, chat_data, db):
 
     ws.clear()
 
-    header = [
-        'Дата',
-        'Пользователь',
-        'Сообщений',
-        'Реакций поставлено',
-        'Реакций получено',
-        'Текст последнего сообщения',
-    ]
-
-    stats = compute_user_stats(chat_data, [], db)
+    history = chat_data.get('history', {})
     users_db = db.get('users', {})
 
-    rows = [header]
-    for uid, s in sorted(stats.items(), key=lambda kv: kv[1]['messages'], reverse=True):
-        username = users_db.get(uid, {}).get('username', f'ID:{uid}')
-        rows.append([
-            '',  # Дата — not tracked by compute_user_stats (see note above)
-            username,
-            s['messages'],
-            s['reactions_given'],
-            s['reactions_received'],
-            s['last_text'],
-        ])
+    def _username(uid):
+        return users_db.get(str(uid), {}).get('username', f'ID:{uid}')
+
+    rows = []
+
+    # --- Block 1: User statistics (aggregate) ---
+    stats = compute_user_stats(chat_data, [], db)
+    rows.append(['СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ'])
+    rows.append(['Чат', 'Пользователь', 'Сообщений',
+                 'Реакций поставлено', 'Реакций получено'])
+    for uid, s in sorted(stats.items(),
+                         key=lambda kv: kv[1]['messages'], reverse=True):
+        rows.append([tab_title, _username(uid), s['messages'],
+                     s['reactions_given'], s['reactions_received']])
+    rows.append([])
+    rows.append([])
+
+    # --- Block 2: All messages (row by row, with date/time) ---
+    all_messages = []
+    for date_key, messages in history.items():
+        for msg in messages:
+            uid = str(msg.get('user_id'))
+            ts = msg.get('timestamp', date_key)
+            text = msg.get('text_in_msg', '') or msg.get('text', '')
+            if not text:
+                text = '[Медиа/Без текста]'
+            link = msg.get('link_to_message', '')
+            all_messages.append((ts, uid, text, link))
+    all_messages.sort(key=lambda x: x[0])
+
+    rows.append(['СПИСОК СООБЩЕНИЙ'])
+    rows.append(['Пользователь', 'Дата и время',
+                 'Текст сообщения', 'Ссылка на сообщение'])
+    for ts, uid, text, link in all_messages:
+        rows.append([_username(uid), ts, text, link])
+    rows.append([])
+    rows.append([])
+
+    # --- Block 3: Membership events (join/leave history) ---
+    membership = chat_data.get('membership_events', [])
+    rows.append(['ИСТОРИЯ ПОДПИСОК/ОТПИСОК'])
+    rows.append(['Пользователь', 'Отписка/Подписка', 'Дата'])
+    for event in sorted(membership, key=lambda e: e.get('date', '')):
+        uid = str(event.get('user_id'))
+        action = 'Подписка' if event.get('action') == 'joined' else 'Отписка'
+        rows.append([_username(uid), action, event.get('date', '')])
 
     ws.update(rows)
 

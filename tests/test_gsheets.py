@@ -243,10 +243,10 @@ def test_update_admin_spreadsheet_creates_tabs_and_summary(monkeypatch):
     # 3 reactions given total (delta 1 from bob + delta 2 from alice).
     assert row[3] == 3
 
-    # Group tab also written.
+    # Group tab also written — first row is now a block title, header is row 1.
     group_ws.clear.assert_called_once()
     group_rows_written = group_ws.update.call_args.args[0]
-    assert group_rows_written[0][2] == 'Сообщений'
+    assert group_rows_written[1][2] == 'Сообщений'
 
 
 def test_update_admin_spreadsheet_deletes_stray_tabs(monkeypatch):
@@ -418,6 +418,33 @@ def _build_chat_data():
     }
 
 
+def _build_chat_data_with_membership():
+    """chat_data with history, reactions and membership_events."""
+    base = _build_chat_data()
+    base['membership_events'] = [
+        {'user_id': '100', 'action': 'joined', 'date': '2026-01-01T08:00:00'},
+        {'user_id': '200', 'action': 'left', 'date': '2026-01-01T09:30:00'},
+    ]
+    return base
+
+
+def _find_block(rows, title):
+    """Return (title_idx, header_idx, data_rows) for the block titled *title*."""
+    title_idx = None
+    for i, r in enumerate(rows):
+        if r and r[0] == title:
+            title_idx = i
+            break
+    assert title_idx is not None, f"block title {title!r} not found"
+    header_idx = title_idx + 1
+    data = []
+    for r in rows[header_idx + 1:]:
+        if not r:
+            break
+        data.append(r)
+    return title_idx, header_idx, data
+
+
 def test_write_group_tab_creates_worksheet_and_writes_rows():
     from unittest.mock import MagicMock
 
@@ -436,47 +463,116 @@ def test_write_group_tab_creates_worksheet_and_writes_rows():
         'chats': {},
     }
 
-    gsheets._write_group_tab(sh, 'Group A', _build_chat_data(), db)
+    gsheets._write_group_tab(sh, 'Group A', _build_chat_data_with_membership(), db)
 
     # Should have scanned existing tabs and created a new one.
     sh.add_worksheet.assert_called_once_with('Group A', rows=100, cols=6)
     new_ws.clear.assert_called_once()
 
-    # Inspect the rows written via ws.update.
     assert new_ws.update.called
     rows = new_ws.update.call_args.args[0]
-    header = rows[0]
-    assert header == [
-        'Дата',
-        'Пользователь',
-        'Сообщений',
-        'Реакций поставлено',
-        'Реакций получено',
-        'Текст последнего сообщения',
-    ]
 
-    # Two data rows, sorted by messages desc.
-    data_rows = rows[1:]
-    assert len(data_rows) == 2
-    # alice (100): 2 messages, 2 reactions given, 1 received, last text '[Медиа/Без текста]'
-    # bob   (200): 1 message,  1 reaction given,  2 received, last text 'world'
-    by_user = {r[1]: r for r in data_rows}
-    alice = by_user['alice']
-    assert alice[0] == ''  # Дата placeholder
-    assert alice[2] == 2
-    assert alice[3] == 2
-    assert alice[4] == 1
-    assert alice[5] == '[Медиа/Без текста]'
-
-    bob = by_user['bob']
-    assert bob[2] == 1
-    assert bob[3] == 1
-    assert bob[4] == 2
-    assert bob[5] == 'world'
-
+    # --- Block 1: user statistics ---
+    t1, h1, d1 = _find_block(rows, 'СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ')
+    assert rows[h1] == ['Чат', 'Пользователь', 'Сообщений',
+                        'Реакций поставлено', 'Реакций получено']
+    assert len(d1) == 2
     # Sorted by messages desc → alice (2) before bob (1).
-    assert data_rows[0][1] == 'alice'
-    assert data_rows[1][1] == 'bob'
+    assert d1[0][1] == 'alice'
+    assert d1[0][0] == 'Group A'  # Чат column = tab title
+    assert d1[0][2] == 2
+    assert d1[0][3] == 2  # reactions_given
+    assert d1[0][4] == 1  # reactions_received
+    assert d1[1][1] == 'bob'
+    assert d1[1][2] == 1
+    assert d1[1][3] == 1
+    assert d1[1][4] == 2
+
+    # --- Two empty separator rows after block 1 ---
+    after_b1 = t1 + 1 + 1 + len(d1)  # title + header + data
+    assert rows[after_b1] == []
+    assert rows[after_b1 + 1] == []
+
+    # --- Block 2: all messages ---
+    t2, h2, d2 = _find_block(rows, 'СПИСОК СООБЩЕНИЙ')
+    assert rows[h2] == ['Пользователь', 'Дата и время',
+                        'Текст сообщения', 'Ссылка на сообщение']
+    # 3 messages in _build_chat_data, sorted by timestamp.
+    assert len(d2) == 3
+    assert d2[0][1] == '2026-01-01T10:00:00'
+    assert d2[0][0] == 'alice'
+    assert d2[0][2] == 'hello'
+    assert d2[0][3] == 'https://t.me/c/1/10'
+    assert d2[1][1] == '2026-01-01T11:00:00'
+    assert d2[1][0] == 'bob'
+    assert d2[1][2] == 'world'
+    assert d2[2][2] == '[Медиа/Без текста]'
+
+    # --- Two empty separator rows after block 2 ---
+    after_b2 = t2 + 1 + 1 + len(d2)
+    assert rows[after_b2] == []
+    assert rows[after_b2 + 1] == []
+
+    # --- Block 3: membership events ---
+    t3, h3, d3 = _find_block(rows, 'ИСТОРИЯ ПОДПИСОК/ОТПИСОК')
+    assert rows[h3] == ['Пользователь', 'Отписка/Подписка', 'Дата']
+    assert len(d3) == 2
+    # Sorted by date: 08:00 (joined) then 09:30 (left)
+    assert d3[0][0] == 'alice'
+    assert d3[0][1] == 'Подписка'
+    assert d3[0][2] == '2026-01-01T08:00:00'
+    assert d3[1][0] == 'bob'
+    assert d3[1][1] == 'Отписка'
+    assert d3[1][2] == '2026-01-01T09:30:00'
+
+
+def test_write_group_tab_message_count_matches_history():
+    """Number of message rows in block 2 == total messages in history."""
+    from unittest.mock import MagicMock
+
+    sh = MagicMock()
+    new_ws = MagicMock()
+    sh.worksheets.return_value = []
+    sh.add_worksheet.return_value = new_ws
+
+    db = {'users': {'100': {'username': 'a'}, '200': {'username': 'b'}},
+          'chats': {}}
+    chat_data = _build_chat_data_with_membership()
+    total_msgs = sum(len(v) for v in chat_data['history'].values())
+
+    gsheets._write_group_tab(sh, 'G', chat_data, db)
+    rows = new_ws.update.call_args.args[0]
+    _, _, d2 = _find_block(rows, 'СПИСОК СООБЩЕНИЙ')
+    assert len(d2) == total_msgs
+
+
+def test_write_group_tab_has_empty_separators_between_blocks():
+    """Verify exactly two empty rows separate each block."""
+    from unittest.mock import MagicMock
+
+    sh = MagicMock()
+    new_ws = MagicMock()
+    sh.worksheets.return_value = []
+    sh.add_worksheet.return_value = new_ws
+
+    db = {'users': {}, 'chats': {}}
+    gsheets._write_group_tab(sh, 'G', _build_chat_data_with_membership(), db)
+    rows = new_ws.update.call_args.args[0]
+
+    # Find block title indices.
+    titles = [i for i, r in enumerate(rows) if r and r[0] in (
+        'СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ', 'СПИСОК СООБЩЕНИЙ',
+        'ИСТОРИЯ ПОДПИСОК/ОТПИСОК')]
+    assert len(titles) == 3
+    # Between block 1 end and block 2 title there must be 2 empty rows.
+    # Find the empty run before titles[1] and titles[2].
+    for t_idx in titles[1:]:
+        empties = 0
+        j = t_idx - 1
+        while j >= 0 and rows[j] == []:
+            empties += 1
+            j -= 1
+        assert empties == 2, f"expected 2 empty rows before block at {t_idx}"
 
 
 def test_write_group_tab_reuses_existing_worksheet():
@@ -511,8 +607,9 @@ def test_write_group_tab_username_fallback_to_id():
     gsheets._write_group_tab(sh, 'Group X', _build_chat_data(), db)
 
     rows = new_ws.update.call_args.args[0]
-    data_rows = rows[1:]
-    usernames = {r[1] for r in data_rows}
+    # Collect all usernames that appear in block 1 data rows.
+    _, _, d1 = _find_block(rows, 'СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ')
+    usernames = {r[1] for r in d1}
     assert 'ID:100' in usernames
     assert 'ID:200' in usernames
 
@@ -530,9 +627,11 @@ def test_write_group_tab_empty_chat():
     gsheets._write_group_tab(sh, 'Empty', {'history': {}, 'reactions': {}}, db)
 
     rows = new_ws.update.call_args.args[0]
-    # Only the header row, no data rows.
-    assert len(rows) == 1
-    assert rows[0][2] == 'Сообщений'
+    # Three block titles + three headers, no data rows, plus 4 empty separators.
+    titles = [r[0] for r in rows if r]
+    assert 'СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ' in titles
+    assert 'СПИСОК СООБЩЕНИЙ' in titles
+    assert 'ИСТОРИЯ ПОДПИСОК/ОТПИСОК' in titles
 
 
 def test_get_or_create_admin_spreadsheet_reuses_existing_id(monkeypatch):
@@ -822,7 +921,7 @@ def test_integrated_update_two_chats_creates_group_tabs_and_summary(monkeypatch)
     # Group tabs: header written for both.
     assert group_ws.clear.call_count == 2
     assert group_ws.update.call_count == 2
-    written_headers = [c.args[0][0] for c in group_ws.update.call_args_list]
+    written_headers = [c.args[0][1] for c in group_ws.update.call_args_list]
     for header in written_headers:
         assert header[2] == 'Сообщений'
 

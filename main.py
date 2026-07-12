@@ -35,7 +35,9 @@ PAGE_SIZE = 5
 
 # Единая целевая таблица Google Sheets: пишем только для одного админа
 # (вместо перебора всех админов). ID таблицы извлечён из URL sharing-ссылки.
-SHEETS_TARGET_ADMIN_ID = '1736016311'
+# ADMIN_ID (суперадмин) используется для get_admin_groups, чтобы в выгрузку
+# попали ВСЕ группы из БД, а не только те, где конкретный юзер — админ.
+SHEETS_TARGET_ADMIN_ID = str(ADMIN_ID)  # 648981358 — суперадмин, видит все группы
 SHEETS_TARGET_SPREADSHEET_ID = '1P_7r0zO7O-FNrm1Dy3PG919yZ459MbHF5zcw7ezHkQM'
 
 # Блокировки на уровне чата — предотвращают параллельный вызов LLM
