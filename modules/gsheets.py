@@ -222,12 +222,31 @@ def sanitize_sheet_title(title: str) -> str:
 SUMMARY_TAB_TITLE = 'Общая статистика'
 
 
-def _write_summary_tab(sh, group_rows: list):
-    """Write the ``Общая статистика`` summary tab into spreadsheet ``sh``.
+def _write_summary_tab(sh, group_rows: list, groups: dict, db: dict):
+    """Write the ``Общая статистика`` summary tab with full cross-chat data.
 
     Finds an existing ``Общая статистика`` worksheet (clearing it in place,
     per the idempotent-update policy in RESEARCH.md) or creates it as the
-    first sheet, then writes the header row followed by one row per group.
+    first sheet, then writes four blocks:
+
+    Block 0 — Сводка по группам (one row per group):
+        ``['Группа', 'Всего сообщений', 'Всего юзеров', 'Всего реакций']``.
+
+    Block 1 — Статистика пользователей по чатам (per-user per-chat):
+        ``['Чат', 'Пользователь', 'Сообщений', 'Реакций поставлено',
+        'Реакций получено']``, sorted by message count descending within
+        each chat.
+
+    Block 2 — Все сообщения по всем чатам (every message with date/time):
+        ``['Чат', 'Пользователь', 'Дата и время', 'Текст сообщения',
+        'Ссылка на сообщение']``, sorted by timestamp.
+
+    Block 3 — История подписок/отписок по всем чатам:
+        ``['Чат', 'Пользователь', 'Отписка/Подписка', 'Дата']``, sorted by
+        date.
+
+    Each block is separated by two empty rows, matching the CSV export
+    layout.
 
     Purely synchronous — meant to run inside ``asyncio.to_thread`` by the
     async public callers.
@@ -236,6 +255,9 @@ def _write_summary_tab(sh, group_rows: list):
         sh: an open gspread ``Spreadsheet``.
         group_rows: list of row lists shaped
             ``[[group_title, total_messages, total_users, total_reactions], ...]``.
+        groups: ``{chat_id_str: group_title}`` dict from ``get_admin_groups``.
+        db: the in-memory database dict (used for history, reactions,
+            membership events and username resolution).
     """
     summary_ws = None
     for ws in sh.worksheets():
@@ -245,13 +267,80 @@ def _write_summary_tab(sh, group_rows: list):
 
     if summary_ws is None:
         summary_ws = sh.add_worksheet(
-            SUMMARY_TAB_TITLE, rows=100, cols=4, index=0
+            SUMMARY_TAB_TITLE, rows=100, cols=6, index=0
         )
 
     summary_ws.clear()
 
-    header = ['Группа', 'Всего сообщений', 'Всего юзеров', 'Всего реакций']
-    summary_ws.update([header] + list(group_rows))
+    chats = db.get('chats', {})
+    users_db = db.get('users', {})
+
+    def _username(uid):
+        return users_db.get(str(uid), {}).get('username', f'ID:{uid}')
+
+    rows = []
+
+    # --- Block 0: Group summary (existing compact view) ---
+    rows.append(['Группа', 'Всего сообщений', 'Всего юзеров', 'Всего реакций'])
+    rows.extend(group_rows)
+    rows.append([])
+    rows.append([])
+
+    # --- Block 1: User statistics per chat ---
+    rows.append(['СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ ПО ЧАТАМ'])
+    rows.append(['Чат', 'Пользователь', 'Сообщений',
+                 'Реакций поставлено', 'Реакций получено'])
+    for cid, title in groups.items():
+        chat_data = chats.get(cid, {})
+        stats = compute_user_stats(chat_data, [], db)
+        for uid, s in sorted(stats.items(),
+                             key=lambda kv: kv[1]['messages'], reverse=True):
+            rows.append([title, _username(uid), s['messages'],
+                         s['reactions_given'], s['reactions_received']])
+    rows.append([])
+    rows.append([])
+
+    # --- Block 2: All messages across all chats ---
+    all_messages = []
+    for cid, title in groups.items():
+        chat_data = chats.get(cid, {})
+        history = chat_data.get('history', {})
+        for date_key, messages in history.items():
+            for msg in messages:
+                uid = str(msg.get('user_id'))
+                ts = msg.get('timestamp', date_key)
+                text = msg.get('text_in_msg', '') or msg.get('text', '')
+                if not text:
+                    text = '[Медиа/Без текста]'
+                link = msg.get('link_to_message', '')
+                all_messages.append((ts, title, uid, text, link))
+    all_messages.sort(key=lambda x: x[0])
+
+    rows.append(['СПИСОК СООБЩЕНИЙ ПО ВСЕМ ЧАТАМ'])
+    rows.append(['Чат', 'Пользователь', 'Дата и время',
+                 'Текст сообщения', 'Ссылка на сообщение'])
+    for ts, title, uid, text, link in all_messages:
+        rows.append([title, _username(uid), ts, text, link])
+    rows.append([])
+    rows.append([])
+
+    # --- Block 3: Membership events across all chats ---
+    all_events = []
+    for cid, title in groups.items():
+        chat_data = chats.get(cid, {})
+        membership = chat_data.get('membership_events', [])
+        for event in membership:
+            all_events.append((event.get('date', ''), title, event))
+    all_events.sort(key=lambda x: x[0])
+
+    rows.append(['ИСТОРИЯ ПОДПИСОК/ОТПИСОК ПО ВСЕМ ЧАТАМ'])
+    rows.append(['Чат', 'Пользователь', 'Отписка/Подписка', 'Дата'])
+    for _date, title, event in all_events:
+        uid = str(event.get('user_id'))
+        action = 'Подписка' if event.get('action') == 'joined' else 'Отписка'
+        rows.append([title, _username(uid), action, event.get('date', '')])
+
+    summary_ws.update(rows)
 
 
 def _write_group_tab(sh, tab_title, chat_data, db):
@@ -414,7 +503,7 @@ async def update_admin_spreadsheet(admin_user_id, spreadsheet_id, db):
         total_rxns = sum(s['reactions_given'] for s in stats.values())
         group_rows.append([title, total_msgs, total_users, total_rxns])
 
-    await asyncio.to_thread(_write_summary_tab, sh, group_rows)
+    await asyncio.to_thread(_write_summary_tab, sh, group_rows, groups, db)
 
     logging.info(
         "Sheets sync: admin=%s spreadsheet=%s updated (%d groups)",

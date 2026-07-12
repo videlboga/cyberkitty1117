@@ -234,14 +234,19 @@ def test_update_admin_spreadsheet_creates_tabs_and_summary(monkeypatch):
 
     summary_ws.clear.assert_called_once()
     summary_rows = summary_ws.update.call_args.args[0]
+    # Block 0: group summary header + group rows
     assert summary_rows[0] == ['Группа', 'Всего сообщений', 'Всего юзеров', 'Всего реакций']
-    assert len(summary_rows) == 2
     row = summary_rows[1]
     assert row[0] == 'Group A'
     assert row[1] == 3  # 3 messages in _build_chat_data
     assert row[2] == 2  # 2 users
     # 3 reactions given total (delta 1 from bob + delta 2 from alice).
     assert row[3] == 3
+    # Two empty separators after block 0
+    assert summary_rows[2] == []
+    assert summary_rows[3] == []
+    # Block 1: user stats per chat
+    assert summary_rows[4][0] == 'СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ ПО ЧАТАМ'
 
     # Group tab also written — first row is now a block title, header is row 1.
     group_ws.clear.assert_called_once()
@@ -910,13 +915,17 @@ def test_integrated_update_two_chats_creates_group_tabs_and_summary(monkeypatch)
     assert 'Beta' in created_titles
     assert gsheets.SUMMARY_TAB_TITLE in created_titles
 
-    # Summary tab: header + 2 group rows.
+    # Summary tab: block 0 = header + 2 group rows, then 2 empty, then block 1 title.
     summary_ws.clear.assert_called_once()
     summary_rows = summary_ws.update.call_args.args[0]
     assert summary_rows[0] == ['Группа', 'Всего сообщений', 'Всего юзеров', 'Всего реакций']
-    assert len(summary_rows) == 3
-    group_names = {r[0] for r in summary_rows[1:]}
+    group_names = {summary_rows[1][0], summary_rows[2][0]}
     assert group_names == {'Alpha', 'Beta'}
+    # Two empty separators after block 0
+    assert summary_rows[3] == []
+    assert summary_rows[4] == []
+    # Block 1: user stats per chat title
+    assert summary_rows[5][0] == 'СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ ПО ЧАТАМ'
 
     # Group tabs: header written for both.
     assert group_ws.clear.call_count == 2
